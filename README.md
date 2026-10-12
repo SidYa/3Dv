@@ -1,6 +1,6 @@
 # 3Dv
 
-A simple, fast 3D model viewer for Windows, Linux and macOS. Tauri 2 (Rust) + Svelte 5 + Three.js.
+A simple, fast 3D model viewer for Windows, Linux and MacOS.
 
 **Formats:** GLB, GLTF, OBJ, FBX, STL, PLY, DAE, 3DS
 
