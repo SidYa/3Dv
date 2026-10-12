@@ -1,0 +1,23 @@
+[package]
+name = "dv3"
+version = "1.3.0"
+description = "Powerful minimalist 3D Viewer"
+edition = "2021"
+
+[[bin]]
+name = "3Dv"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+md5 = "0.7"
+tokio = { version = "1", features = ["sync", "time"] }

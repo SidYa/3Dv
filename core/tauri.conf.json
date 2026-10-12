@@ -1,0 +1,51 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "3Dv",
+  "version": "1.3.0",
+  "identifier": "com.3dv.viewer",
+  "build": {
+    "devUrl": "http://localhost:1440",
+    "frontendDist": "../app/dist",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "3Dv",
+        "width": 900,
+        "height": 680,
+        "minWidth": 400,
+        "minHeight": 300,
+        "visible": false
+      }
+    ],
+    "security": {
+      "csp": null,
+      "assetProtocol": { "enable": true, "scope": ["**"] }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis", "appimage", "deb", "dmg"],
+    "icon": ["icons/icon.png", "icons/icon.ico"],
+    "category": "GraphicsAndDesign",
+    "resources": {
+      "../thumbnail-provider/build/3DvThumb.dll": "thumbnail-dll/3DvThumb.dll",
+      "../LICENSE": "LICENSE.txt",
+      "../THIRD-PARTY-NOTICES.txt": "THIRD-PARTY-NOTICES.txt"
+    },
+    "fileAssociations": [
+      { "ext": ["glb"], "name": "3Dv.Viewer", "description": "3D Model", "mimeType": "model/gltf-binary" },
+      { "ext": ["gltf"], "name": "3Dv.Viewer", "description": "3D Model", "mimeType": "model/gltf+json" },
+      { "ext": ["obj"], "name": "3Dv.Viewer", "description": "3D Model", "mimeType": "model/obj" },
+      { "ext": ["fbx"], "name": "3Dv.Viewer", "description": "3D Model", "mimeType": "application/x-fbx" },
+      { "ext": ["stl"], "name": "3Dv.Viewer", "description": "3D Model", "mimeType": "model/stl" },
+      { "ext": ["ply"], "name": "3Dv.Viewer", "description": "3D Model", "mimeType": "application/x-ply" },
+      { "ext": ["dae"], "name": "3Dv.Viewer", "description": "3D Model", "mimeType": "model/vnd.collada+xml" },
+      { "ext": ["3ds"], "name": "3Dv.Viewer", "description": "3D Model", "mimeType": "application/x-3ds" }
+    ],
+    "windows": { "nsis": { "installerIcon": "icons/icon.ico" } }
+  }
+}

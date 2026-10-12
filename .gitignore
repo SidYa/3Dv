@@ -1,0 +1,32 @@
+node_modules
+dist
+target/
+release
+*.log
+.DS_Store
+.claude
+
+# MSVC output for the Explorer thumbnail provider
+thumbnail-provider/build/
+thumbnail-provider/*.obj
+thumbnail-provider/*.lib
+thumbnail-provider/*.exp
+thumbnail-provider/*.pdb
+
+# backups created by the AGENTS.md snapshot recipe
+BCP/
+
+# AI coding agents: instructions, settings, memory - local only
+AGENTS.md
+CLAUDE.md
+CLAUDE.local.md
+GEMINI.md
+.claude/
+.codex/
+.cursor/
+.cursorrules
+.windsurf/
+.windsurfrules
+.aider*
+.continue/
+.github/copilot-instructions.md
