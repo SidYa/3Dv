@@ -36,11 +36,17 @@ const pathUtils = {
 // sidesteps MAX_PATH limits. Each path segment is encoded separately and
 // joined with '/', so a glTF's relative buffer/texture references resolve
 // against the model's URL just as they would over http - encoding the
-// whole path as one segment would break them.
+// whole path as one segment would break them. The scheme differs per
+// platform the same way convertFileSrc's does: WebView2 only routes
+// http://asset.localhost, WebKitGTK and WKWebView only asset://localhost.
+const ASSET_ORIGIN = /Windows|Android/.test(navigator.userAgent)
+    ? 'http://asset.localhost'
+    : 'asset://localhost';
+
 export function toModelUrl(nativePath: string) {
     const fwd = nativePath.replace(/\\/g, '/');
     const encoded = fwd.split('/').map((seg) => encodeURIComponent(seg)).join('/');
-    return `http://asset.localhost/${encoded}`;
+    return `${ASSET_ORIGIN}/${encoded}`;
 }
 
 function hasVertexColors(geometry) {

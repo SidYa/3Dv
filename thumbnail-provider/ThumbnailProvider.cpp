@@ -134,21 +134,28 @@ static DWORD RunThumbnailCLI(const std::wstring& exePath, const std::wstring& mo
     return waitResult == WAIT_OBJECT_0 ? exitCode : 1;
 }
 
-// resources\thumbnail-dll\3DvThumb.dll -> the 3Dv.exe three levels up.
+// The Tauri installer puts the DLL at <install>\thumbnail-dll\3DvThumb.dll,
+// so 3Dv.exe is two levels up. Older Electron installs kept it under
+// resources\thumbnail-dll\, three levels up; both are probed.
 static bool FindViewerExecutable(std::wstring& exePath)
 {
-    wchar_t modulePath[MAX_PATH];
-    if (GetModuleFileNameW(g_hInst, modulePath, MAX_PATH) == 0) return false;
+    wchar_t dir[MAX_PATH];
+    if (GetModuleFileNameW(g_hInst, dir, MAX_PATH) == 0) return false;
 
-    for (int i = 0; i < 3; i++)
+    for (int level = 1; level <= 3; level++)
     {
-        if (FAILED(PathCchRemoveFileSpec(modulePath, MAX_PATH))) return false;
-    }
-    if (FAILED(PathCchCombine(modulePath, MAX_PATH, modulePath, L"3Dv.exe"))) return false;
-    if (!PathFileExistsW(modulePath)) return false;
+        if (FAILED(PathCchRemoveFileSpec(dir, MAX_PATH))) return false;
+        if (level < 2) continue;
 
-    exePath.assign(modulePath);
-    return true;
+        wchar_t candidate[MAX_PATH];
+        if (FAILED(PathCchCombine(candidate, MAX_PATH, dir, L"3Dv.exe"))) return false;
+        if (PathFileExistsW(candidate))
+        {
+            exePath.assign(candidate);
+            return true;
+        }
+    }
+    return false;
 }
 
 // A unique, empty file in %TEMP% for the CLI to replace with the PNG.

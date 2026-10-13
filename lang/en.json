@@ -10,7 +10,7 @@
   "single_window": "In one window",
   "reset_view": "Reset View",
   "set_default": "Set as Default Viewer",
-  "hotkeys_hint": "O options | Space play/pause | L top light | R reset view | I info | Ctrl+O open",
+  "hotkeys_hint": "O options | Space play/pause | L light level | R reset view | I info | Ctrl+O open",
   "loading": "Loading Model...",
   "success_assoc": "3Dv is now set as the default viewer for 3D models.",
   "fail_assoc": "Failed to set as default. Try running as Administrator.",
@@ -20,5 +20,10 @@
   "info_triangles": "Triangles",
   "info_vertices": "Vertices",
   "info_objects": "Objects",
-  "info_animations": "Animations"
+  "info_animations": "Animations",
+  "fail_format": "This file format is not supported.",
+  "light_off": "Extra light: off",
+  "light_low": "Extra light: low",
+  "light_medium": "Extra light: medium",
+  "light_high": "Extra light: high"
 }

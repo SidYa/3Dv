@@ -139,8 +139,10 @@ fn open_in_viewer(app: &AppHandle, file: Option<String>) {
             let _ = win.unminimize();
             let _ = win.set_focus();
             let _ = win.show();
+            // emit() would broadcast to every viewer window; only main
+            // should open the file.
             if let Some(f) = file {
-                let _ = win.emit("open-file", f);
+                let _ = win.emit_to("main", "open-file", f);
             }
             return;
         }
@@ -344,14 +346,10 @@ fn run_app(cli: Option<ThumbnailRequest>, initial: Option<String>) {
                     });
                 }
                 None => {
-                    // Old Electron showed the window on ready-to-show to avoid
-                    // an empty-frame flash; same idea here.
-                    if let Some(win) = app.get_webview_window("main") {
-                        std::thread::spawn(move || {
-                            std::thread::sleep(std::time::Duration::from_millis(300));
-                            let _ = win.show();
-                        });
-                    }
+                    // The main window is created here rather than from the
+                    // config ("create": false), so CLI thumbnail runs do not
+                    // boot a hidden viewer next to the thumbnailer.
+                    create_viewer_window(&handle);
                     // Housekeeping, off the startup path.
                     std::thread::spawn(thumb::remove_legacy_cache);
                 }

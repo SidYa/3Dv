@@ -13,6 +13,7 @@
     "windows": [
       {
         "label": "main",
+        "create": false,
         "title": "3Dv",
         "width": 900,
         "height": 680,

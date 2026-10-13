@@ -26,6 +26,14 @@
   const MAX_PIXEL_RATIO = 2;
   const TEXTURE_SETTLE_MS = 10000;
   const SUPPORTED = ['.glb', '.gltf', '.obj', '.fbx', '.stl', '.ply', '.dae', '.3ds'];
+  // L cycles off -> low -> medium -> high. Each step adds a top light and
+  // lifts the environment, so the shadowed sides brighten too.
+  const LIGHT_LEVELS = [
+    { top: 0, env: 0.5, label: 'light_off' },
+    { top: 0.8, env: 0.7, label: 'light_low' },
+    { top: 1.6, env: 0.9, label: 'light_medium' },
+    { top: 2.6, env: 1.2, label: 'light_high' },
+  ];
 
   // --- ui state ---------------------------------------------------------
   let currentLang = $state('en');
@@ -54,6 +62,7 @@
   let timer: THREE.Timer;
   let gridHelper: THREE.GridHelper | null = null;
   let topDownLight: THREE.DirectionalLight;
+  let lightLevel = 0;
   let mixer: THREE.AnimationMixer | null = null;
   let currentModel: THREE.Object3D | null = null;
   let isAnimating = false;
@@ -120,7 +129,7 @@
     addStudioLights(scene);
     applyEnvironment(scene, renderer);
 
-    topDownLight = new THREE.DirectionalLight(0xffffff, 1);
+    topDownLight = new THREE.DirectionalLight(0xffffff, 0);
     topDownLight.position.set(0, 10, 0);
     topDownLight.visible = false;
     scene.add(topDownLight);
@@ -263,7 +272,10 @@
   }
 
   async function loadModel(filePath: string) {
-    if (!isSupportedModel(filePath)) return;
+    if (!isSupportedModel(filePath)) {
+      showToast(t.fail_format);
+      return;
+    }
     const token = ++loadToken;
 
     clearModel();
@@ -337,7 +349,12 @@
 
   function setWindowTitle(filePath: string) {
     const name = filePath.split(/[\\/]/).pop();
-    document.title = name ? `${name} - 3Dv` : '3Dv';
+    const title = name ? `${name} - 3Dv` : '3Dv';
+    document.title = title;
+    // Tauri does not mirror document.title into the native title bar.
+    try {
+      getCurrentWindow().setTitle(title).catch(() => {});
+    } catch (_) {}
   }
 
   async function openFileDialog() {
@@ -358,6 +375,16 @@
     }
   }
 
+  function cycleLight() {
+    lightLevel = (lightLevel + 1) % LIGHT_LEVELS.length;
+    const level = LIGHT_LEVELS[lightLevel];
+    topDownLight.intensity = level.top;
+    topDownLight.visible = level.top > 0;
+    scene.environmentIntensity = level.env;
+    showToast(t[level.label]);
+    requestRender();
+  }
+
   function onKeyDown(event: KeyboardEvent) {
     if (event.code === 'KeyO' && (event.ctrlKey || event.metaKey)) {
       event.preventDefault();
@@ -373,10 +400,7 @@
 
     if (event.code === 'KeyO') showOptions = !showOptions;
     if (event.code === 'KeyI') showInfo = !showInfo;
-    if (event.code === 'KeyL') {
-      topDownLight.visible = !topDownLight.visible;
-      requestRender();
-    }
+    if (event.code === 'KeyL') cycleLight();
     if (event.code === 'KeyR') controls.reset();
     if (event.code === 'Escape') showOptions = false;
     if (event.code === 'Space') {
@@ -442,9 +466,18 @@
     try {
       const win = getCurrentWindow();
       unlistens.push(
+        // Tauri swallows the HTML5 drag events, so the drop-zone
+        // highlight is driven from here as well.
         await win.onDragDropEvent((event) => {
-          if (event.payload.type === 'drop' && event.payload.paths.length > 0) {
-            dragging = false;
+          const type = event.payload.type;
+          if (type === 'enter' || type === 'over') {
+            showDrop = true;
+            dragging = true;
+            return;
+          }
+          dragging = false;
+          if (currentModel) showDrop = false;
+          if (type === 'drop' && event.payload.paths.length > 0) {
             openFile(event.payload.paths[0]);
           }
         }),
@@ -520,8 +553,8 @@
         on:input={() => {
           (scene.background as THREE.Color).set(bgColor);
           requestRender();
-          persist('bgColor', bgColor);
         }}
+        on:change={() => persist('bgColor', bgColor)}
       />
     </div>
 
