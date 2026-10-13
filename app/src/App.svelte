@@ -507,7 +507,7 @@
         on:change={() => persist('lang', currentLang)}
       >
         <option value="en">English</option>
-        <option value="ua">??????????</option>
+        <option value="ua">Українська</option>
       </select>
     </div>
 

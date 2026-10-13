@@ -32,9 +32,7 @@
     "icon": ["icons/icon.png", "icons/icon.ico"],
     "category": "GraphicsAndDesign",
     "resources": {
-      "../thumbnail-provider/build/3DvThumb.dll": "thumbnail-dll/3DvThumb.dll",
-      "../LICENSE": "LICENSE.txt",
-      "../THIRD-PARTY-NOTICES.txt": "THIRD-PARTY-NOTICES.txt"
+      "../thumbnail-provider/build/3DvThumb.dll": "thumbnail-dll/3DvThumb.dll"
     },
     "fileAssociations": [
       { "ext": ["glb"], "name": "3Dv.Viewer", "description": "3D Model", "mimeType": "model/gltf-binary" },
