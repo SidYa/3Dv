@@ -291,6 +291,48 @@ pub fn remove_legacy_cache() {
     let _ = std::fs::remove_dir(dir.parent().unwrap_or(Path::new(".")));
 }
 
+// --- CLI WebView2 profiles ----------------------------------------------------
+// Every WebView in a profile folder shares one browser process, and that
+// process is a child of whichever 3Dv started it first. The Explorer
+// provider runs each CLI render in a kill-on-close job, so a viewer (or a
+// parallel render) that joined a CLI's browser lost its WebView the moment
+// that render finished: the viewer stayed alive but dead, and every later
+// "open" was forwarded to it by the single-instance lock. Each CLI run
+// therefore gets a private profile folder that nothing else ever joins.
+const CLI_PROFILE_MAX_AGE: Duration = Duration::from_secs(10 * 60);
+
+pub fn cli_profile_dir(app: &AppHandle) -> Option<PathBuf> {
+    let root = app.path().app_local_data_dir().ok()?.join("thumb-profiles");
+    sweep_cli_profiles(&root);
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    Some(root.join(format!("{}-{stamp}", std::process::id())))
+}
+
+// The browser still holds its files when the CLI exits, so a run cannot
+// remove its own folder; later runs drop the ones old enough to be unused
+// (the provider kills a render after 30s).
+fn sweep_cli_profiles(root: &Path) {
+    let entries = match std::fs::read_dir(root) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let old = entry
+            .metadata()
+            .and_then(|m| m.created().or_else(|_| m.modified()))
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .map(|age| age > CLI_PROFILE_MAX_AGE)
+            .unwrap_or(false);
+        if old {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
 // --- render queue -----------------------------------------------------------
 type RenderResult = Option<Vec<u8>>;
 
@@ -312,11 +354,18 @@ struct Inner {
 
 pub struct ThumbService {
     inner: Mutex<Inner>,
+    // WebView2 profile of the hidden window; None = the app's default one.
+    profile_dir: Option<PathBuf>,
 }
 
 impl ThumbService {
     pub fn new() -> Self {
+        Self::with_profile(None)
+    }
+
+    pub fn with_profile(profile_dir: Option<PathBuf>) -> Self {
         Self {
+            profile_dir,
             inner: Mutex::new(Inner {
                 next_id: 1,
                 queue: VecDeque::new(),
@@ -353,11 +402,15 @@ fn ensure_window(app: &AppHandle, svc: &ThumbService) {
         return;
     }
     let handle = app.clone();
-    match tauri::WebviewWindowBuilder::new(
+    let mut builder = tauri::WebviewWindowBuilder::new(
         app,
         THUMB_WINDOW_LABEL,
         tauri::WebviewUrl::App("index.html".into()),
-    )
+    );
+    if let Some(dir) = &svc.profile_dir {
+        builder = builder.data_directory(dir.clone());
+    }
+    match builder
     .title("3Dv Thumbnailer")
     .inner_size(300.0, 300.0)
     .visible(false)

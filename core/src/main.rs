@@ -310,7 +310,6 @@ fn run_app(cli: Option<ThumbnailRequest>, initial: Option<String>) {
     let pending = Mutex::new(initial.into_iter().collect::<Vec<String>>());
     let builder = tauri::Builder::default()
         .manage(PendingFiles(pending))
-        .manage(thumb::ThumbService::new())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
@@ -340,12 +339,16 @@ fn run_app(cli: Option<ThumbnailRequest>, initial: Option<String>) {
             let handle = app.handle().clone();
             match cli.clone() {
                 Some(req) => {
+                    // Private WebView2 profile, see thumb::cli_profile_dir.
+                    let profile = thumb::cli_profile_dir(&handle);
+                    app.manage(thumb::ThumbService::with_profile(profile));
                     std::thread::spawn(move || {
                         let code = tauri::async_runtime::block_on(cli_render(&handle, &req));
                         std::process::exit(code);
                     });
                 }
                 None => {
+                    app.manage(thumb::ThumbService::new());
                     // The main window is created here rather than from the
                     // config ("create": false), so CLI thumbnail runs do not
                     // boot a hidden viewer next to the thumbnailer.
