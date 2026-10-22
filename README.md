@@ -10,10 +10,10 @@ A simple, fast 3D model viewer for Windows, Linux and MacOS.
 - model thumbnails in Windows Explorer
 - orbit, wireframe, grid, animations, model info
 
-**Keys:** `O` options · `I` info · `Space` animation · `L` light · `R` reset view · `Ctrl+O` open
-
-**Layout:** `app/` Svelte frontend · `core/` Rust backend · `lang/` UI strings · `thumbnail-provider/` Explorer thumbnail DLL (C++)
-
-**Dev:** `npm install --prefix app`, then `app\node_modules\.bin\tauri dev --config core\tauri.conf.json` from the repo root
-
-**Build:** `app\node_modules\.bin\tauri build --config core\tauri.conf.json` from the repo root
+**Keys:** 
+`O` options
+`I` info
+`Space` animation
+`L` light
+`R` reset view
+`Ctrl+O` open
