@@ -1,6 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "bundle": {
-    "resources": []
+    "resources": {
+      "../thumbnail-provider/build/3DvThumb.dll": null
+    }
   }
 }

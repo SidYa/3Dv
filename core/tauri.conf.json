@@ -32,7 +32,11 @@
     "targets": ["nsis", "appimage", "deb", "rpm", "dmg"],
     "icon": ["icons/icon.png", "icons/icon.ico"],
     "category": "GraphicsAndDesign",
+    "publisher": "Sergii Sidko",
+    "copyright": "© 2026 Sergii Sidko",
+    "license": "GPL-3.0-only",
     "resources": {
+      "../LICENSE": "LICENSE.txt",
       "../thumbnail-provider/build/3DvThumb.dll": "thumbnail-dll/3DvThumb.dll"
     },
     "fileAssociations": [
