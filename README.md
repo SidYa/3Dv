@@ -12,4 +12,4 @@ A simple and fast 3D model viewer
 `R` reset view <br>
 `Ctrl+O` open
 
-<img width="951" height="832" alt="Screenshot 2026-10-25 095622" src="https://github.com/user-attachments/assets/4a5f1fbd-ec71-4e28-aa14-48925932ec13" />
+<img width="868" height="741" alt="Screenshot 2026-10-25 124040" src="https://github.com/user-attachments/assets/29c82eab-7570-468b-a517-b1d8e3ade2cc" />
