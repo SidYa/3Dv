@@ -1,6 +1,6 @@
 # 3Dv
 
-A simple, fast 3D model viewer for Windows and Linux
+A simple and fast 3D model viewer
 
 **Formats:** GLB, GLTF, OBJ, FBX, STL, PLY, DAE, 3DS
 
