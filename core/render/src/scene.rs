@@ -376,6 +376,9 @@ pub struct Scene {
     pub meshes: Vec<Mesh>,
     pub materials: Vec<Material>,
     pub images: Vec<Image>,
+    /// For the viewer (Textures::references): image index → the texture
+    /// reference as the model wrote it, for three.js to load itself.
+    pub image_references: std::collections::HashMap<usize, String>,
 }
 
 /// three's Color.setRGB(r, g, b, SRGBColorSpace) for one channel.
@@ -444,6 +447,11 @@ impl Placement {
         let local = Aabb::from_points(mesh.positions.iter());
         mesh.bounds = local.transformed(&self.world);
         mesh.origin = self.world.transform_point3(Vec3::ZERO);
+        // Nothing to move: the attributes stay exactly as the file has them
+        // (three does not normalize normals either).
+        if self.world == Mat4::IDENTITY {
+            return mesh;
+        }
         for p in mesh.positions.iter_mut() {
             *p = self.position(*p);
         }

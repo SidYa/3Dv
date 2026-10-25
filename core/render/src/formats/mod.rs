@@ -49,12 +49,16 @@ pub const EXTENSIONS: &[&str] = &["glb", "gltf", "obj", "fbx", "stl", "ply", "da
 
 /// Loads any supported model. `max_texture` caps texture sizes.
 pub fn load(path: &Path, max_texture: u32) -> Result<Scene, LoadError> {
+    load_with(path, Textures::new(path, max_texture))
+}
+
+/// Loads a model with the given texture handling.
+pub fn load_with(path: &Path, mut textures: Textures) -> Result<Scene, LoadError> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
         .map(|e| e.to_ascii_lowercase())
         .unwrap_or_default();
-    let mut textures = Textures::new(path, max_texture);
     let mut scene = match ext.as_str() {
         "glb" | "gltf" => gltf::load(path, &mut textures),
         "obj" => obj::load(path, &mut textures),
@@ -67,6 +71,16 @@ pub fn load(path: &Path, max_texture: u32) -> Result<Scene, LoadError> {
     }?;
     textures.finish(&mut scene);
     Ok(scene)
+}
+
+/// Whether an STL file is binary, by STLLoader's test.
+pub fn stl_is_binary(path: &Path) -> Result<bool, LoadError> {
+    use std::io::Read;
+    let mut head = [0u8; 84];
+    let mut file = std::fs::File::open(path)?;
+    let size = file.metadata()?.len();
+    let read = file.read(&mut head)?;
+    Ok(stl::is_binary_header(&head[..read], size))
 }
 
 /// The material loaders.ts gives STL and PLY meshes (asMesh): grey, or white

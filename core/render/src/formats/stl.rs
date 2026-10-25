@@ -22,9 +22,14 @@ pub fn load(path: &Path) -> Result<Scene, LoadError> {
 /// STLLoader.isBinary(): the size a binary file of that face count would
 /// have decides; failing that, a file starting with "solid" is ASCII.
 fn is_binary(data: &[u8]) -> bool {
+    is_binary_header(data, data.len() as u64)
+}
+
+/// is_binary() from the first 84 bytes and the file size.
+pub(crate) fn is_binary_header(data: &[u8], size: u64) -> bool {
     if data.len() >= 84 {
         let faces = u32::from_le_bytes([data[80], data[81], data[82], data[83]]) as u64;
-        if 84 + faces * 50 == data.len() as u64 {
+        if 84 + faces * 50 == size {
             return true;
         }
     }

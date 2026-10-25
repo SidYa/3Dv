@@ -1,17 +1,16 @@
-// Native thumbnail renderer of 3Dv.
+// Model loading and thumbnail rendering of 3Dv.
 //
-// Loads a model with Rust ports of the three.js loaders the viewer uses and
-// draws it offscreen with wgpu, reproducing the viewer's thumbnail scene
-// (app/src/Thumbnail.svelte + app/src/lib/scene.ts) closely enough that a
-// cached thumbnail looks like the opened model. Anything it cannot handle
-// is reported as an error so the caller can fall back to the WebView
-// renderer, which remains the reference.
+// Rust ports of the three.js loaders the viewer uses, an offscreen wgpu
+// renderer reproducing the viewer's scene (app/src/lib/scene.ts) closely
+// enough that a cached thumbnail looks like the opened model, and (viewer.rs)
+// the fast path the viewer itself takes for large text formats.
 
 mod env;
 pub mod formats;
 mod gpu;
 pub mod scene;
 pub mod texture;
+pub mod viewer;
 
 use std::path::Path;
 use std::time::{Duration, Instant};

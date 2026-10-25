@@ -49,6 +49,15 @@ const F_OPAQUE: u32 = 16u;
 const F_SIZE_ATTENUATION: u32 = 32u;
 const F_ALPHA_TEST: u32 = 64u;
 const F_NO_TONE_MAPPING: u32 = 128u;
+// Face culling happens here rather than in the pipeline, so one compiled
+// pipeline serves front, back and double-sided materials alike (the HLSL
+// compiler behind DX12 is what makes a first thumbnail slow).
+const F_CULL_BACK: u32 = 256u;
+const F_CULL_FRONT: u32 = 512u;
+
+// Specialization: the transmission code is compiled only into pipelines
+// that draw transmissive materials.
+override USE_TRANSMISSION: bool = true;
 
 // Texture slots, flags.z bit per slot present, flags.w bit per slot on uv1.
 const T_MAP: u32 = 0u;
@@ -545,6 +554,10 @@ fn fs_main(in: VsOut, @builtin(front_facing) front_facing: bool) -> @location(0)
     let st0 = dpdx(uv_normal);
     let st1 = dfdy2(uv_normal);
 
+    if (has_flag(F_CULL_BACK) && !front_facing) || (has_flag(F_CULL_FRONT) && front_facing) {
+        discard;
+    }
+
     let model = material.flags.x;
     var diffuse_color = material.color;
     if has_texture(T_MAP) {
@@ -705,7 +718,7 @@ fn fs_main(in: VsOut, @builtin(front_facing) front_facing: bool) -> @location(0)
         // transmission_fragment: the diffuse part gives way to the light
         // refracted through the surface.
         var transmission = material.transmission.x;
-        if transmission > 0.0 {
+        if USE_TRANSMISSION && transmission > 0.0 {
             if has_texture(T_TRANSMISSION) {
                 transmission *= texel_transmission.r;
             }

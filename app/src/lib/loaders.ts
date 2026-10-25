@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { invoke } from '@tauri-apps/api/core';
 
 // Each format's loader is fetched the first time a file of that format is
 // opened. A viewer window only ever needs one or two of
@@ -154,6 +155,147 @@ async function loadOBJ(filePath, url, resolve, reject, onProgress) {
     }).catch(objOnly);
 }
 
+// --- Rust fast path -----------------------------------------------------------
+// OBJ, PLY and STL are parsed by the Rust ports of these very loaders
+// (core/render, command load_model): several times faster on large files and
+// off the UI thread. The answer is one binary blob - "3DVG", the JSON length,
+// the JSON describing meshes and materials, then the vertex data the typed
+// arrays below view without copying. Textures load through TextureLoader
+// exactly as the three.js loaders would.
+const NATIVE_FORMATS = ['.obj', '.ply', '.stl'];
+const NATIVE_MAGIC = 0x47564433; // "3DVG"
+
+const isRemote = (url: string) => /^https?:/i.test(url);
+
+// One three.js material from the JSON description (see viewer.rs).
+function nativeMaterial(def: any, topology: string, dir: string, textures: Map<string, any>) {
+    const common = {
+        opacity: def.opacity,
+        transparent: def.transparent,
+        alphaTest: def.alphaTest,
+        depthWrite: def.depthWrite,
+        vertexColors: def.vertexColors,
+        blending: def.additive ? THREE.AdditiveBlending : THREE.NormalBlending,
+    };
+    const color = new THREE.Color().setRGB(def.color[0], def.color[1], def.color[2]);
+    const texture = (name: string, srgb: boolean) => {
+        const t = def.maps[name];
+        if (!t) return null;
+        const key = t.source + (srgb ? ':srgb' : '') + ':' + t.matrix.join(',') + ':' + t.wrapS + t.wrapT + t.channel;
+        let tex = textures.get(key);
+        if (!tex) {
+            // As MTLLoader / TDSLoader resolve them: the model folder plus the
+            // reference as written.
+            tex = textures.get('loader').load(isRemote(t.source) ? t.source : dir + t.source);
+            if (srgb) tex.colorSpace = THREE.SRGBColorSpace;
+            tex.wrapS = t.wrapS;
+            tex.wrapT = t.wrapT;
+            tex.channel = t.channel;
+            tex.matrixAutoUpdate = false;
+            tex.matrix.set(...t.matrix);
+            textures.set(key, tex);
+        }
+        return tex;
+    };
+    if (topology === 'points') {
+        return new THREE.PointsMaterial({ ...common, color, size: def.size, sizeAttenuation: def.sizeAttenuation, map: texture('map', true) });
+    }
+    if (topology === 'lines') {
+        return new THREE.LineBasicMaterial({ ...common, color });
+    }
+    const maps: Record<string, any> = {
+        map: texture('map', true),
+        emissiveMap: texture('emissiveMap', true),
+        normalMap: texture('normalMap', false),
+        bumpMap: texture('bumpMap', false),
+        aoMap: texture('aoMap', false),
+        alphaMap: texture('alphaMap', false),
+        specularMap: texture('specularMap', false),
+    };
+    for (const k of Object.keys(maps)) if (!maps[k]) delete maps[k];
+    const side = [THREE.FrontSide, THREE.BackSide, THREE.DoubleSide][def.side];
+    const lit = {
+        ...common,
+        ...maps,
+        color,
+        side,
+        flatShading: def.flatShading,
+        emissive: new THREE.Color().setRGB(def.emissive[0], def.emissive[1], def.emissive[2]),
+        bumpScale: def.bumpScale,
+        normalScale: new THREE.Vector2(def.normalScale[0], def.normalScale[1]),
+        aoMapIntensity: def.aoMapIntensity,
+    };
+    switch (def.type) {
+        case 'standard': {
+            const { specularMap, ...standard } = lit;
+            return new THREE.MeshStandardMaterial({ ...standard, roughness: def.roughness, metalness: def.metalness });
+        }
+        case 'lambert':
+            return new THREE.MeshLambertMaterial(lit);
+        case 'basic': {
+            const { emissiveMap, normalMap, bumpMap, ...basicMaps } = maps;
+            return new THREE.MeshBasicMaterial({ ...common, ...basicMaps, color, side });
+        }
+        default:
+            return new THREE.MeshPhongMaterial({
+                ...lit,
+                specular: new THREE.Color().setRGB(def.specular[0], def.specular[1], def.specular[2]),
+                shininess: def.shininess,
+            });
+    }
+}
+
+// Builds the three.js objects the matching three loader would have built.
+function buildNative(buffer: ArrayBuffer, filePath: string) {
+    const view = new DataView(buffer);
+    if (view.getUint32(0, true) !== NATIVE_MAGIC) throw new Error('bad native model');
+    const jsonLength = view.getUint32(4, true);
+    const header = JSON.parse(new TextDecoder().decode(new Uint8Array(buffer, 8, jsonLength)));
+    const base = (8 + jsonLength + 3) & ~3;
+    const floats = ([offset, length]: [number, number]) => new Float32Array(buffer, base + offset, length / 4);
+    const uints = ([offset, length]: [number, number]) => new Uint32Array(buffer, base + offset, length / 4);
+    const dir = toModelUrl(pathUtils.dirname(filePath)) + '/';
+    const textures = new Map<string, any>([['loader', new THREE.TextureLoader()]]);
+    const materials = new Map<string, any>();
+    const material = (index: number, topology: string) => {
+        const key = index + ':' + topology;
+        if (!materials.has(key)) materials.set(key, nativeMaterial(header.materials[index], topology, dir, textures));
+        return materials.get(key);
+    };
+    const group = new THREE.Group();
+    for (const mesh of header.meshes) {
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.BufferAttribute(floats(mesh.position), 3));
+        if (mesh.normal) geometry.setAttribute('normal', new THREE.BufferAttribute(floats(mesh.normal), 3));
+        if (mesh.uv) geometry.setAttribute('uv', new THREE.BufferAttribute(floats(mesh.uv), 2));
+        if (mesh.uv1) geometry.setAttribute('uv1', new THREE.BufferAttribute(floats(mesh.uv1), 2));
+        if (mesh.color) geometry.setAttribute('color', new THREE.BufferAttribute(floats(mesh.color), 3));
+        if (mesh.index) geometry.setIndex(new THREE.BufferAttribute(uints(mesh.index), 1));
+        let meshMaterial;
+        if (mesh.groups.length > 1) {
+            meshMaterial = mesh.groups.map(([, , m]: number[]) => material(m, mesh.topology));
+            mesh.groups.forEach(([start, count]: number[], i: number) => geometry.addGroup(start, count, i));
+        } else {
+            meshMaterial = material(mesh.groups[0][2], mesh.topology);
+        }
+        const Kind = mesh.topology === 'points' ? THREE.Points : mesh.topology === 'lines' ? THREE.LineSegments : THREE.Mesh;
+        group.add(new Kind(geometry, meshMaterial));
+    }
+    return group;
+}
+
+// The model through Rust, or null to use the three.js loader (outside
+// Tauri, or when the Rust side cannot read the file).
+async function loadNative(filePath: string) {
+    try {
+        const buffer = await invoke<ArrayBuffer>('load_model', { path: filePath });
+        return buildNative(buffer, filePath);
+    } catch (e) {
+        console.warn('Native loader unavailable, using three.js:', e);
+        return null;
+    }
+}
+
 // Loads any supported model file.
 // Resolves with { object, animations }; rejects on failure.
 // onProgress receives the underlying fetch's ProgressEvent, which the
@@ -184,12 +326,19 @@ export function loadModelFile(filePath, glRenderer, onProgress) {
                 vertexColors: useVertexColors
             }));
         };
-        const done = (object, animations) => {
+        const done = (object: any, animations?: any[]) => {
             ensureNormals(object);
             resolve({ object, animations: animations || object.animations || [] });
         };
 
         try {
+            if (NATIVE_FORMATS.includes(ext)) {
+                const object = await loadNative(filePath);
+                if (object) {
+                    done(object);
+                    return;
+                }
+            }
             switch (ext) {
                 case '.glb': case '.gltf':
                     (await getGLTFLoader(glRenderer)).load(url,

@@ -103,6 +103,8 @@ const F_BACK_SIDE: u32 = 8;
 const F_OPAQUE: u32 = 16;
 const F_SIZE_ATTENUATION: u32 = 32;
 const F_ALPHA_TEST: u32 = 64;
+const F_CULL_BACK: u32 = 256;
+const F_CULL_FRONT: u32 = 512;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Blend {
@@ -114,7 +116,8 @@ enum Blend {
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct PipelineKey {
     topology: u8,
-    cull: u8,
+    /// The pipeline carries the transmission code (USE_TRANSMISSION).
+    transmission: bool,
     blend: Blend,
     depth_write: bool,
     /// Drawing the linear transmission source instead of the 8-bit canvas.
@@ -190,8 +193,17 @@ impl Renderer {
     pub fn new(software: bool) -> Result<Renderer, RenderError> {
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
         desc.backends = wgpu::Backends::all();
-        // No validation layers or debug labels in release builds.
-        desc.flags = if cfg!(debug_assertions) { wgpu::InstanceFlags::debugging() } else { wgpu::InstanceFlags::empty() };
+        // No validation layers in release builds. On DX12 the DEBUG flag only
+        // makes FXC skip optimization, which cuts the first thumbnail's
+        // shader compile by a third; GPU time is negligible at this size and
+        // the output is the same.
+        desc.flags = if cfg!(debug_assertions) {
+            wgpu::InstanceFlags::debugging()
+        } else if cfg!(windows) {
+            wgpu::InstanceFlags::DEBUG
+        } else {
+            wgpu::InstanceFlags::empty()
+        };
         let instance = wgpu::Instance::new(desc);
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
@@ -311,9 +323,7 @@ impl Renderer {
     /// Compiles the pipelines nearly every model needs, so the first
     /// thumbnail does not wait for them.
     pub fn warm_up(&mut self) {
-        for cull in [2u8, 0] {
-            self.pipeline(PipelineKey { topology: 0, cull, blend: Blend::None, depth_write: true, hdr: false });
-        }
+        self.pipeline(PipelineKey { topology: 0, transmission: false, blend: Blend::None, depth_write: true, hdr: false });
     }
 
     fn pipeline(&mut self, key: PipelineKey) -> &wgpu::RenderPipeline {
@@ -361,11 +371,8 @@ impl Renderer {
                     _ => wgpu::PrimitiveTopology::TriangleList,
                 },
                 front_face: wgpu::FrontFace::Ccw,
-                cull_mode: match key.cull {
-                    1 => Some(wgpu::Face::Front),
-                    2 => Some(wgpu::Face::Back),
-                    _ => None,
-                },
+                // Culled in the fragment shader, see F_CULL_BACK.
+                cull_mode: None,
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
@@ -380,7 +387,7 @@ impl Renderer {
             fragment: Some(wgpu::FragmentState {
                 module: &self.shader,
                 entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
+                compilation_options: wgpu::PipelineCompilationOptions { constants: &[("USE_TRANSMISSION", if key.transmission { 1.0 } else { 0.0 })], ..Default::default() },
                 targets: &[Some(wgpu::ColorTargetState { format: if key.hdr { HDR_FORMAT } else { COLOR_FORMAT }, blend, write_mask: wgpu::ColorWrites::ALL })],
             }),
             multiview_mask: None,
@@ -641,7 +648,7 @@ impl Renderer {
                 let group = self.material_group(scene, d.material, d.pass, topology, &mut cache.textures);
                 cache.groups.insert((d.material, d.pass), group);
             }
-            let key = PipelineKey { hdr, ..pipeline_key(&scene.materials[d.material], topology, d.pass) };
+            let key = PipelineKey { hdr, ..pipeline_key(&scene.materials[d.material], topology) };
             self.pipeline(key);
             keys.push(key);
         }
@@ -798,6 +805,14 @@ impl Renderer {
         if let AlphaMode::Mask(_) = m.alpha_mode {
             flags |= F_ALPHA_TEST;
         }
+        // three culls per material side; lines and points are never culled.
+        if topology == Topology::Triangles {
+            flags |= match (m.side, pass) {
+                (Side::Double, Pass::BackFaces) | (Side::Back, _) => F_CULL_FRONT,
+                (Side::Double, Pass::FrontFaces) | (Side::Front, _) => F_CULL_BACK,
+                (Side::Double, Pass::Normal) => 0,
+            };
+        }
         let shading = match (m.shading, topology) {
             (_, Topology::Points | Topology::Lines) => 3,
             (Shading::Standard, _) => 0,
@@ -865,23 +880,11 @@ struct Cache {
     groups: HashMap<(usize, Pass), wgpu::BindGroup>,
 }
 
-fn pipeline_key(m: &Material, topology: Topology, pass: Pass) -> PipelineKey {
+fn pipeline_key(m: &Material, topology: Topology) -> PipelineKey {
     let topology_id = match topology {
         Topology::Triangles => 0,
         Topology::Lines => 1,
         Topology::Points => 2,
-    };
-    // three culls per material side; lines and points are never culled.
-    let cull = if topology != Topology::Triangles {
-        0
-    } else {
-        match (m.side, pass) {
-            (Side::Double, Pass::BackFaces) => 1,
-            (Side::Double, Pass::FrontFaces) => 2,
-            (Side::Double, Pass::Normal) => 0,
-            (Side::Back, _) => 1,
-            (Side::Front, _) => 2,
-        }
     };
     let blend = if !m.is_transparent() {
         Blend::None
@@ -890,7 +893,7 @@ fn pipeline_key(m: &Material, topology: Topology, pass: Pass) -> PipelineKey {
     } else {
         Blend::Normal
     };
-    PipelineKey { topology: topology_id, cull, blend, depth_write: m.depth_write, hdr: false }
+    PipelineKey { topology: topology_id, transmission: m.is_transmissive() && topology == Topology::Triangles, blend, depth_write: m.depth_write, hdr: false }
 }
 
 /// Object3D.lookAt for a camera: right-handed, looking down -Z.

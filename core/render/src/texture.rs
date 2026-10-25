@@ -45,6 +45,8 @@ pub struct Textures {
     by_key: HashMap<String, Option<usize>>,
     black: Option<usize>,
     pending: Vec<Pending>,
+    /// Record references instead of decoding (Textures::references).
+    references: bool,
 }
 
 impl Textures {
@@ -56,7 +58,15 @@ impl Textures {
             by_key: HashMap::new(),
             black: None,
             pending: Vec::new(),
+            references: false,
         }
+    }
+
+    /// For the viewer: textures are not decoded; each one becomes a
+    /// placeholder image whose reference lands in Scene::image_references,
+    /// and three.js loads it at full size the way it always does.
+    pub fn references(model: &Path) -> Textures {
+        Textures { references: true, ..Textures::new(model, 16) }
     }
 
     /// A texture referenced from the model by a path relative to it, loaded
@@ -68,6 +78,16 @@ impl Textures {
     }
 
     pub fn load_with(&mut self, scene: &mut Scene, reference: &str, tga: bool, missing: Missing) -> Option<usize> {
+        if self.references {
+            let key = format!("ref:{reference}");
+            if let Some(cached) = self.by_key.get(&key) {
+                return *cached;
+            }
+            let image = scene.add_image(Image { width: 1, height: 1, rgba: vec![0, 0, 0, 255] });
+            scene.image_references.insert(image, reference.to_string());
+            self.by_key.insert(key, Some(image));
+            return Some(image);
+        }
         let Some(path) = self.resolve(reference) else { return self.fallback(scene, missing) };
         let key = (path.clone(), tga, missing == Missing::Black);
         if let Some(cached) = self.by_path.get(&key) {

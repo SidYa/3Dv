@@ -145,29 +145,29 @@ impl State {
         (r >= 0 && (r as usize) < len).then_some(r as usize)
     }
 
-    fn add_face(&mut self, v: [&[&str]; 3]) {
+    /// One triangle; each corner is (vertex, uv, normal) references, "" for
+    /// a missing one.
+    fn add_face(&mut self, v: [&[&str; 3]; 3]) {
         let vlen = self.vertices.len();
         let Some(ia) = Self::resolve(v[0][0], vlen) else { return };
         let Some(ib) = Self::resolve(v[1][0], vlen) else { return };
         let Some(ic) = Self::resolve(v[2][0], vlen) else { return };
         let (pa, pb, pc) = (self.vertices[ia], self.vertices[ib], self.vertices[ic]);
         let colors = [self.colors[ia], self.colors[ib], self.colors[ic]];
-        let normal_refs = [v[0].get(2), v[1].get(2), v[2].get(2)];
-        let normals = if normal_refs.iter().all(|r| r.is_some_and(|s| !s.is_empty())) {
+        let normals = if v.iter().all(|c| !c[2].is_empty()) {
             let nlen = self.normals.len();
-            let get = |r: &Option<&&str>| r.and_then(|s| Self::resolve(s, nlen)).map(|i| self.normals[i]).unwrap_or([0.0; 3]);
-            [get(&normal_refs[0]), get(&normal_refs[1]), get(&normal_refs[2])]
+            let get = |r: &str| Self::resolve(r, nlen).map(|i| self.normals[i]).unwrap_or([0.0; 3]);
+            [get(v[0][2]), get(v[1][2]), get(v[2][2])]
         } else {
             // addFaceNormal: (c - b) x (a - b), normalised.
             let (a, b, c) = (Vec3::from_array(pa), Vec3::from_array(pb), Vec3::from_array(pc));
             let n = (c - b).cross(a - b).normalize_or_zero().to_array();
             [n, n, n]
         };
-        let uv_refs = [v[0].get(1), v[1].get(1), v[2].get(1)];
-        let uvs = if uv_refs.iter().all(|r| r.is_some_and(|s| !s.is_empty())) {
+        let uvs = if v.iter().all(|c| !c[1].is_empty()) {
             let ulen = self.uvs.len();
-            let get = |r: &Option<&&str>| r.and_then(|s| Self::resolve(s, ulen)).map(|i| self.uvs[i]).unwrap_or([0.0; 2]);
-            Some([get(&uv_refs[0]), get(&uv_refs[1]), get(&uv_refs[2])])
+            let get = |r: &str| Self::resolve(r, ulen).map(|i| self.uvs[i]).unwrap_or([0.0; 2]);
+            Some([get(v[0][1]), get(v[1][1]), get(v[2][1])])
         } else {
             None
         };
@@ -213,36 +213,54 @@ pub fn load(path: &Path, textures: &mut Textures) -> Result<Scene, LoadError> {
 }
 
 fn parse(text: &str) -> State {
-    let text = text.replace("\r\n", "\n").replace("\\\n", "");
+    // OBJLoader: \r\n becomes \n, then a backslash at a line end joins the
+    // next line. The copy is only made when there is such a continuation;
+    // otherwise a trailing \r is cut per line, which is the same thing.
+    let joined;
+    let text = if text.contains("\\\n") || text.contains("\\\r\n") {
+        joined = text.replace("\r\n", "\n").replace("\\\n", "");
+        joined.as_str()
+    } else {
+        text
+    };
     let mut state = State { objects: vec![Object::new(false)], vertices: Vec::new(), normals: Vec::new(), colors: Vec::new(), uvs: Vec::new() };
+    let mut corners: Vec<[&str; 3]> = Vec::new();
     for raw in text.split('\n') {
+        let raw = raw.strip_suffix('\r').unwrap_or(raw);
         let line = raw.trim_start();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
         let first = line.as_bytes()[0];
         if first == b'v' {
-            let data: Vec<&str> = line.split_whitespace().collect();
-            match data[0] {
+            let mut data = line.split_whitespace();
+            let kind = data.next().unwrap_or("");
+            let mut next = || parse_float(data.next());
+            match kind {
                 "v" => {
-                    state.vertices.push([parse_float(data.get(1).copied()), parse_float(data.get(2).copied()), parse_float(data.get(3).copied())]);
-                    state.colors.push(if data.len() >= 7 {
-                        Some(srgb3([parse_float(Some(data[4])), parse_float(Some(data[5])), parse_float(Some(data[6]))]).to_array())
-                    } else {
-                        None
+                    let p = [next(), next(), next()];
+                    let (r, g, b) = (data.next(), data.next(), data.next());
+                    state.vertices.push(p);
+                    state.colors.push(match (r, g, b) {
+                        (Some(r), Some(g), Some(b)) => Some(srgb3([parse_float(Some(r)), parse_float(Some(g)), parse_float(Some(b))]).to_array()),
+                        _ => None,
                     });
                 }
-                "vn" => state.normals.push([parse_float(data.get(1).copied()), parse_float(data.get(2).copied()), parse_float(data.get(3).copied())]),
-                "vt" => state.uvs.push([parse_float(data.get(1).copied()), parse_float(data.get(2).copied())]),
+                "vn" => state.normals.push([next(), next(), next()]),
+                "vt" => state.uvs.push([next(), next()]),
                 _ => {}
             }
         } else if first == b'f' {
-            let verts: Vec<Vec<&str>> = line[1..].split_whitespace().map(|v| v.split('/').collect()).collect();
-            if verts.len() < 3 {
+            corners.clear();
+            for v in line[1..].split_whitespace() {
+                let mut parts = v.split('/');
+                corners.push([parts.next().unwrap_or(""), parts.next().unwrap_or(""), parts.next().unwrap_or("")]);
+            }
+            if corners.len() < 3 {
                 continue;
             }
-            for j in 1..verts.len() - 1 {
-                state.add_face([&verts[0], &verts[j], &verts[j + 1]]);
+            for j in 1..corners.len() - 1 {
+                state.add_face([&corners[0], &corners[j], &corners[j + 1]]);
             }
         } else if first == b'l' {
             let parts: Vec<&str> = line[1..].trim().split(' ').collect();

@@ -220,6 +220,18 @@ fn set_as_default(app: AppHandle) -> bool {
     assoc::set_as_default(&app)
 }
 
+// Large OBJ / PLY / STL files parse several times faster in Rust, off the UI
+// thread (core/render/src/viewer.rs). The binary answer reaches JS as an
+// ArrayBuffer, which loaders.ts turns into three.js objects.
+#[tauri::command]
+async fn load_model(path: String) -> Result<tauri::ipc::Response, String> {
+    tauri::async_runtime::spawn_blocking(move || dv3_render::viewer::load(Path::new(&path)))
+        .await
+        .map_err(|e| e.to_string())?
+        .map(tauri::ipc::Response::new)
+        .map_err(|e| e.to_string())
+}
+
 // --- thumbnails -----------------------------------------------------------
 
 // Linux only: puts a freshly opened model's thumbnail into the shared
@@ -280,6 +292,7 @@ fn run_app(initial: Option<String>) {
             set_settings,
             get_initial_file,
             show_open_dialog,
+            load_model,
             generate_thumbnail,
             set_as_default
         ])
