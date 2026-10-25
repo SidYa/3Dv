@@ -14,4 +14,8 @@ export default defineConfig({
     hmr: host ? { protocol: 'ws', host, port: 1441 } : undefined,
     watch: { ignored: ['**/core/**'] },
   },
+  // Modern WebViews only: no syntax down-levelling, less code to parse at start.
+  build: {
+    target: ['es2022', 'chrome105'],
+  },
 })

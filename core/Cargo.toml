@@ -1,6 +1,6 @@
 [package]
 name = "dv3"
-version = "1.3.0"
+version = "1.0.0"
 description = "Powerful minimalist 3D Viewer"
 edition = "2021"
 
@@ -21,3 +21,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 md5 = "0.7"
 tokio = { version = "1", features = ["sync", "time"] }
+
+# Smaller, faster binary: quicker to load at every start and every Explorer
+# thumbnail run (same as Hyper and Farba).
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+strip = true

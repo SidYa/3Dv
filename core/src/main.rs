@@ -170,11 +170,15 @@ fn create_viewer_window(app: &AppHandle) {
         .title("3Dv")
         .inner_size(900.0, 680.0)
         .min_inner_size(400.0, 300.0)
+        // The viewer's own background, so the window never flashes white
+        // before the page paints.
+        .background_color(tauri::window::Color(0x1a, 0x1a, 0x1a, 0xff))
         .visible(false)
         .build()
     {
         Ok(win) => {
-            // Same delayed show as the main window: no empty-frame flash.
+            // The page shows the window after its first frame (App.svelte,
+            // revealWindow); this is the safety net if it is slower or fails.
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_millis(300));
                 let _ = win.show();

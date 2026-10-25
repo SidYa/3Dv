@@ -25,5 +25,14 @@
   "light_off": "Extra light: off",
   "light_low": "Extra light: low",
   "light_medium": "Extra light: medium",
-  "light_high": "Extra light: high"
+  "light_high": "Extra light: high",
+  "licenses": "Licenses",
+  "licenses_title": "Open-source licenses",
+  "licenses_intro": "3Dv is built on the work of these projects.",
+  "licenses_components": "components",
+  "licenses_search": "Search by name or license",
+  "licenses_close": "Close",
+  "licenses_bundled": "Decoders",
+  "licenses_rust": "Rust libraries",
+  "licenses_js": "JavaScript libraries"
 }

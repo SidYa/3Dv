@@ -16,6 +16,7 @@
     disposeObject,
     eachMaterial,
   } from './lib/scene';
+  import LicensesDialog from './LicensesDialog.svelte';
   import enStrings from '../../lang/en.json';
   import ukStrings from '../../lang/uk.json';
 
@@ -25,6 +26,9 @@
   const AUTO_ROTATE_SPEED = 2.9;
   const MAX_PIXEL_RATIO = 2;
   const TEXTURE_SETTLE_MS = 10000;
+  // How often the settle loop walks the materials; the frames in between
+  // still render, only the readiness check is skipped.
+  const TEXTURE_CHECK_MS = 200;
   const SUPPORTED = ['.glb', '.gltf', '.obj', '.fbx', '.stl', '.ply', '.dae', '.3ds'];
   // L cycles off -> low -> medium -> high. Each step adds a top light and
   // lifts the environment, so the shadowed sides brighten too.
@@ -42,6 +46,7 @@
   let dragging = $state(false);
   let showOptions = $state(false);
   let showInfo = $state(false);
+  let showLicenses = $state(false);
   let loading = $state(false);
   let progress = $state('');
   let toast = $state('');
@@ -69,6 +74,8 @@
   let loadToken = 0;
   let needsRender = true;
   let texturesSettleUntil = 0;
+  let nextTextureCheck = 0;
+  let environmentReady = false;
   let rafId = 0;
   let toastTimer: ReturnType<typeof setTimeout> | null = null;
   let unlistens: UnlistenFn[] = [];
@@ -127,7 +134,6 @@
     containerEl.appendChild(renderer.domElement);
 
     addStudioLights(scene);
-    applyEnvironment(scene, renderer);
 
     topDownLight = new THREE.DirectionalLight(0xffffff, 0);
     topDownLight.position.set(0, 10, 0);
@@ -138,6 +144,18 @@
     controls.enableDamping = true;
     controls.autoRotateSpeed = AUTO_ROTATE_SPEED;
     controls.addEventListener('change', requestRender);
+  }
+
+  // The room reflection only matters once a model is shown, and baking it
+  // compiles shaders and renders a cube map - work that used to delay the
+  // first frame. It now runs after the window is up, or right before the
+  // first model if that comes sooner.
+  function ensureEnvironment() {
+    if (environmentReady) return;
+    environmentReady = true;
+    applyEnvironment(scene, renderer);
+    scene.environmentIntensity = LIGHT_LEVELS[lightLevel].env;
+    requestRender();
   }
 
   function onWindowResize() {
@@ -162,8 +180,12 @@
 
     if (texturesSettleUntil) {
       needsRender = true;
-      if (!currentModel || Date.now() > texturesSettleUntil || areTexturesReady(currentModel)) {
+      const now = Date.now();
+      if (!currentModel || now > texturesSettleUntil) {
         texturesSettleUntil = 0;
+      } else if (now >= nextTextureCheck) {
+        nextTextureCheck = now + TEXTURE_CHECK_MS;
+        if (areTexturesReady(currentModel)) texturesSettleUntil = 0;
       }
     }
 
@@ -285,9 +307,12 @@
 
     let loaded: any;
     try {
-      loaded = await loadModelFile(filePath, renderer, (event: any) => {
+      const pending = loadModelFile(filePath, renderer, (event: any) => {
         if (token === loadToken) showProgress(event);
       });
+      // Bake the environment while the file is being read, not after.
+      ensureEnvironment();
+      loaded = await pending;
     } catch (e) {
       console.error('Load failed:', e);
       if (token !== loadToken) return;
@@ -330,6 +355,13 @@
       tunePointSize(currentModel!, normalized.box.getBoundingSphere(new THREE.Sphere()).radius);
       fitView();
       updateInfoPanel(normalized.sourceSize, loaded.animations.length, currentModel!);
+
+      // Compile the model's shaders in parallel (KHR_parallel_shader_compile)
+      // instead of stalling the first frame on them one by one.
+      try {
+        await renderer.compileAsync(currentModel!, camera, scene);
+      } catch (_) {}
+      if (token !== loadToken) return;
 
       loading = false;
       setWindowTitle(filePath);
@@ -391,6 +423,11 @@
       openFileDialog();
       return;
     }
+    if (showLicenses) {
+      // The licences dialog is modal: Escape closes it, the viewer keys wait.
+      if (event.code === 'Escape') showLicenses = false;
+      return;
+    }
     const tag = (event.target as HTMLElement)?.tagName;
     if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || tag === 'BUTTON') {
       if (event.code === 'Escape') showOptions = false;
@@ -443,32 +480,47 @@
     else queuedFile = filePath;
   }
 
+  // The window is created hidden; show it once the first frame is painted
+  // (no empty-frame flash). requestAnimationFrame may not tick while the
+  // window is hidden, so a timer races it; Rust shows it as a safety net.
+  function revealWindow() {
+    let shown = false;
+    const show = () => {
+      if (shown) return;
+      shown = true;
+      try {
+        getCurrentWindow().show().catch(() => {});
+      } catch (_) {}
+      const idle = window.requestIdleCallback ?? ((f: () => void) => setTimeout(f, 50));
+      idle(ensureEnvironment);
+    };
+    requestAnimationFrame(show);
+    setTimeout(show, 30);
+  }
+
   onMount(async () => {
     init(container!);
 
+    let win: ReturnType<typeof getCurrentWindow> | null = null;
     try {
-      settings = (await invoke('get_settings')) as Record<string, any> ?? {};
+      win = getCurrentWindow();
     } catch (_) {
-      settings = {};
+      // Not running under Tauri (browser dev): HTML5 drop keeps working via
+      // file pickers only.
     }
-    currentLang = settings.lang || 'en';
-    singleWindow = settings.singleWindow !== false;
-    if (settings.bgColor) {
-      bgColor = settings.bgColor;
-      (scene.background as THREE.Color).set(settings.bgColor);
-    }
-    autoRotate = settings.autoRotate === true;
-    wireframe = settings.wireframe === true;
-    showGrid = settings.showGrid !== false;
 
-    unlistens.push(await listen<string>('open-file', (e) => openFile(e.payload)));
-
-    try {
-      const win = getCurrentWindow();
-      unlistens.push(
-        // Tauri swallows the HTML5 drag events, so the drop-zone
-        // highlight is driven from here as well.
-        await win.onDragDropEvent((event) => {
+    // Independent IPC round trips: run them together rather than one after
+    // another, a model opened with the app waits for all of them.
+    const [loadedSettings, initial] = await Promise.all([
+      invoke<Record<string, any> | null>('get_settings').catch(() => null),
+      invoke<string | null>('get_initial_file').catch(() => null),
+      listen<string>('open-file', (e) => openFile(e.payload))
+        .then((u) => unlistens.push(u))
+        .catch(() => {}),
+      win
+        ?.onDragDropEvent((event) => {
+          // Tauri swallows the HTML5 drag events, so the drop-zone
+          // highlight is driven from here as well.
           const type = event.payload.type;
           if (type === 'enter' || type === 'over') {
             showDrop = true;
@@ -480,17 +532,22 @@
           if (type === 'drop' && event.payload.paths.length > 0) {
             openFile(event.payload.paths[0]);
           }
-        }),
-      );
-    } catch (_) {
-      // Not running under Tauri (browser dev): HTML5 drop keeps working via
-      // file pickers only.
-    }
+        })
+        .then((u) => unlistens.push(u))
+        .catch(() => {}),
+    ]);
 
-    try {
-      const initial = await invoke<string | null>('get_initial_file');
-      if (initial) queuedFile = initial;
-    } catch (_) {}
+    settings = loadedSettings ?? {};
+    if (initial) queuedFile = initial;
+    currentLang = settings.lang || 'en';
+    singleWindow = settings.singleWindow !== false;
+    if (settings.bgColor) {
+      bgColor = settings.bgColor;
+      (scene.background as THREE.Color).set(settings.bgColor);
+    }
+    autoRotate = settings.autoRotate === true;
+    wireframe = settings.wireframe === true;
+    showGrid = settings.showGrid !== false;
 
     window.addEventListener('resize', onWindowResize);
     window.addEventListener('dragover', onDragOver as EventListener);
@@ -505,6 +562,7 @@
       queuedFile = null;
       loadModel(f);
     }
+    revealWindow();
   });
 
   onDestroy(() => {
@@ -606,6 +664,10 @@
       <button id="set-default" on:click={setAsDefault}>{t.set_default}</button>
     </div>
 
+    <div class="option-item">
+      <button id="licenses" on:click={() => (showLicenses = true)}>{t.licenses}</button>
+    </div>
+
     <p class="hint">{t.hotkeys_hint}</p>
   </div>
 </div>
@@ -624,5 +686,9 @@
   <div class="info-row"><span>{t.info_objects}</span><b>{info.objects}</b></div>
   <div class="info-row"><span>{t.info_animations}</span><b>{info.animations}</b></div>
 </div>
+
+{#if showLicenses}
+  <LicensesDialog {t} onclose={() => (showLicenses = false)} />
+{/if}
 
 <div id="toast" class:hidden={!toastVisible}>{toast}</div>

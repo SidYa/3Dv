@@ -25,5 +25,14 @@
   "light_off": "Додаткове світло: вимкнено",
   "light_low": "Додаткове світло: низьке",
   "light_medium": "Додаткове світло: середнє",
-  "light_high": "Додаткове світло: високе"
+  "light_high": "Додаткове світло: високе",
+  "licenses": "Ліцензії",
+  "licenses_title": "Ліцензії відкритого ПЗ",
+  "licenses_intro": "3Dv побудовано на роботі цих проєктів.",
+  "licenses_components": "компонентів",
+  "licenses_search": "Пошук за назвою або ліцензією",
+  "licenses_close": "Закрити",
+  "licenses_bundled": "Декодери",
+  "licenses_rust": "Бібліотеки Rust",
+  "licenses_js": "Бібліотеки JavaScript"
 }
