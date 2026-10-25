@@ -17,7 +17,7 @@ const FRAME_PADDING = 1.08;
 // Tone mapping is what keeps a plain white default material - what OBJ,
 // Collada and FBX files without materials get - from clipping to a flat
 // silhouette with no visible edges.
-export function configureRenderer(renderer) {
+export function configureRenderer(renderer: THREE.WebGLRenderer) {
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.NeutralToneMapping;
     renderer.toneMappingExposure = 1.0;
@@ -25,7 +25,7 @@ export function configureRenderer(renderer) {
 
 // One dominant key light gives the model readable form; the rest only
 // keeps the shadowed sides from going black.
-export function addStudioLights(scene) {
+export function addStudioLights(scene: THREE.Scene) {
     const ambient = new THREE.AmbientLight(0xffffff, 0.12);
     scene.add(ambient);
 
@@ -46,7 +46,7 @@ export function addStudioLights(scene) {
 
 // A neutral room reflection. Without it, metallic PBR materials - most
 // of glTF - render as flat black.
-export function applyEnvironment(scene, renderer) {
+export function applyEnvironment(scene: THREE.Scene, renderer: THREE.WebGLRenderer) {
     const pmrem = new THREE.PMREMGenerator(renderer);
     try {
         const target = pmrem.fromScene(new RoomEnvironment(), 0.04);
@@ -66,7 +66,7 @@ export function applyEnvironment(scene, renderer) {
 // or tall window. Near/far follow the distance, which keeps depth
 // precision usable for both millimetre- and kilometre-scale models.
 // Returns the bounding sphere, or null when the object has no extent.
-export function frameObject(camera, object, target) {
+export function frameObject(camera: THREE.PerspectiveCamera, object: THREE.Object3D, target?: THREE.Vector3) {
     object.updateWorldMatrix(true, true);
 
     const box = new THREE.Box3().setFromObject(object);
@@ -99,10 +99,10 @@ export function frameObject(camera, object, target) {
 // window.
 const POINT_SIZE_DIVISOR = 64;
 
-export function tunePointSize(object, worldRadius) {
+export function tunePointSize(object: THREE.Object3D, worldRadius: number) {
     if (!(worldRadius > 0)) return;
 
-    object.traverse((child) => {
+    object.traverse((child: any) => {
         if (!child.isPoints || !child.material) return;
         const materials = Array.isArray(child.material) ? child.material : [child.material];
         for (const material of materials) {
@@ -113,7 +113,7 @@ export function tunePointSize(object, worldRadius) {
     });
 }
 
-function disposeMaterial(material) {
+function disposeMaterial(material: any) {
     for (const key of Object.keys(material)) {
         const value = material[key];
         if (value && value.isTexture) value.dispose();
@@ -121,9 +121,9 @@ function disposeMaterial(material) {
     material.dispose();
 }
 
-export function disposeObject(object) {
+export function disposeObject(object: THREE.Object3D | null) {
     if (!object) return;
-    object.traverse((child) => {
+    object.traverse((child: any) => {
         if (child.geometry) child.geometry.dispose();
         if (!child.material) return;
         if (Array.isArray(child.material)) child.material.forEach(disposeMaterial);
@@ -134,8 +134,8 @@ export function disposeObject(object) {
 // Meshes and points, with their materials flattened to a single array -
 // used wherever a per-material tweak has to reach every material,
 // including the array-material case.
-export function eachMaterial(object, callback) {
-    object.traverse((child) => {
+export function eachMaterial(object: THREE.Object3D, callback: (material: any, child: THREE.Object3D) => void) {
+    object.traverse((child: any) => {
         if (!child.material) return;
         const materials = Array.isArray(child.material) ? child.material : [child.material];
         for (const material of materials) {

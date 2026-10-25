@@ -23,13 +23,13 @@ const LOADER_MODULES = {
 };
 
 const pathUtils = {
-    extname: (p) => {
-        const base = p.split(/[\\/]/).pop();
+    extname: (p: string) => {
+        const base = p.split(/[\\/]/).pop() || '';
         const dot = base.lastIndexOf('.');
         return dot > 0 ? base.slice(dot) : '';
     },
-    dirname: (p) => p.substring(0, Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'))),
-    basename: (p) => p.split(/[\\/]/).pop()
+    dirname: (p: string) => p.substring(0, Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'))),
+    basename: (p: string) => p.split(/[\\/]/).pop() || ''
 };
 
 // Models are fetched over Tauri's asset:// protocol, which serves them
@@ -50,7 +50,7 @@ export function toModelUrl(nativePath: string) {
     return `${ASSET_ORIGIN}/${encoded}`;
 }
 
-function hasVertexColors(geometry) {
+function hasVertexColors(geometry: THREE.BufferGeometry) {
     return !!(geometry.hasAttribute && geometry.hasAttribute('color'));
 }
 
@@ -58,7 +58,7 @@ function hasVertexColors(geometry) {
 // it by convention, and OBJ/Collada files converted by older tools do it
 // by accident. A mesh without usable normals gets no shading at all and
 // renders as a flat white silhouette, so they are recomputed here.
-function needsNormals(geometry) {
+function needsNormals(geometry: THREE.BufferGeometry) {
     if (!geometry.hasAttribute || !geometry.hasAttribute('position')) return false;
     if (!geometry.hasAttribute('normal')) return true;
 
@@ -70,15 +70,15 @@ function needsNormals(geometry) {
     return true;
 }
 
-function ensureNormals(object) {
-    object.traverse((child) => {
+function ensureNormals(object: THREE.Object3D) {
+    object.traverse((child: any) => {
         if (child.isMesh && child.geometry && needsNormals(child.geometry)) {
             child.geometry.computeVertexNormals();
         }
     });
 }
 
-function isTextureReady(tex) {
+function isTextureReady(tex: any) {
     if (!tex) return true;
     if (tex.isRenderTargetTexture || tex.isCubeTexture || tex.isCompressedTexture || tex.isDataTexture) return true;
     const img = tex.image;
@@ -94,9 +94,9 @@ function isTextureReady(tex) {
     return true;
 }
 
-export function areTexturesReady(model) {
+export function areTexturesReady(model: THREE.Object3D) {
     let ready = true;
-    model.traverse((child) => {
+    model.traverse((child: any) => {
         if (!ready || !child.isMesh) return;
         const materials = Array.isArray(child.material) ? child.material : [child.material];
         for (const mat of materials) {
@@ -113,10 +113,10 @@ export function areTexturesReady(model) {
     return ready;
 }
 
-let dracoLoader = null;
-let ktx2Loader = null;
+let dracoLoader: any = null;
+let ktx2Loader: any = null;
 
-async function getGLTFLoader(glRenderer) {
+async function getGLTFLoader(glRenderer?: THREE.WebGLRenderer) {
     const [{ GLTFLoader }, { DRACOLoader }, { KTX2Loader }, { MeshoptDecoder }] = await LOADER_MODULES.gltf();
     if (!dracoLoader) {
         dracoLoader = new DRACOLoader();
@@ -134,7 +134,7 @@ async function getGLTFLoader(glRenderer) {
     return loader;
 }
 
-async function loadOBJ(filePath, url, resolve, reject, onProgress) {
+async function loadOBJ(filePath: string, url: string, resolve: (object: THREE.Group) => void, reject: (error: unknown) => void, onProgress?: (event: ProgressEvent) => void) {
     const [{ OBJLoader }, { MTLLoader }] = await LOADER_MODULES.obj();
     const objOnly = () => new OBJLoader().load(url, resolve, onProgress, reject);
     const mtlPath = filePath.replace(/\.obj$/i, '.mtl');
@@ -162,8 +162,13 @@ async function loadOBJ(filePath, url, resolve, reject, onProgress) {
 // the JSON describing meshes and materials, then the vertex data the typed
 // arrays below view without copying. Textures load through TextureLoader
 // exactly as the three.js loaders would.
-const NATIVE_FORMATS = ['.obj', '.ply', '.stl'];
+//
+// Binary FBX comes back as a "3DVF" blob instead: the file's nodes and the
+// finished mesh buffers, from which FBXLoader's own code builds the rest
+// (parseNativeFBX, appended to FBXLoader by vite.config.ts).
+const NATIVE_FORMATS = ['.obj', '.ply', '.stl', '.fbx'];
 const NATIVE_MAGIC = 0x47564433; // "3DVG"
+const NATIVE_FBX_MAGIC = 0x46564433; // "3DVF"
 
 const isRemote = (url: string) => /^https?:/i.test(url);
 
@@ -227,7 +232,7 @@ function nativeMaterial(def: any, topology: string, dir: string, textures: Map<s
     };
     switch (def.type) {
         case 'standard': {
-            const { specularMap, ...standard } = lit;
+            const { specularMap, ...standard } = lit as typeof lit & { specularMap?: THREE.Texture };
             return new THREE.MeshStandardMaterial({ ...standard, roughness: def.roughness, metalness: def.metalness });
         }
         case 'lambert':
@@ -278,8 +283,9 @@ function buildNative(buffer: ArrayBuffer, filePath: string) {
         } else {
             meshMaterial = material(mesh.groups[0][2], mesh.topology);
         }
-        const Kind = mesh.topology === 'points' ? THREE.Points : mesh.topology === 'lines' ? THREE.LineSegments : THREE.Mesh;
-        group.add(new Kind(geometry, meshMaterial));
+        group.add(mesh.topology === 'points' ? new THREE.Points(geometry, meshMaterial)
+            : mesh.topology === 'lines' ? new THREE.LineSegments(geometry, meshMaterial)
+            : new THREE.Mesh(geometry, meshMaterial));
     }
     return group;
 }
@@ -289,6 +295,11 @@ function buildNative(buffer: ArrayBuffer, filePath: string) {
 async function loadNative(filePath: string) {
     try {
         const buffer = await invoke<ArrayBuffer>('load_model', { path: filePath });
+        if (new DataView(buffer).getUint32(0, true) === NATIVE_FBX_MAGIC) {
+            const fbx: any = await LOADER_MODULES.fbx();
+            const base = THREE.LoaderUtils.extractUrlBase(toModelUrl(filePath));
+            return fbx.parseNativeFBX(new fbx.FBXLoader(), buffer, base);
+        }
         return buildNative(buffer, filePath);
     } catch (e) {
         console.warn('Native loader unavailable, using three.js:', e);
@@ -300,11 +311,11 @@ async function loadNative(filePath: string) {
 // Resolves with { object, animations }; rejects on failure.
 // onProgress receives the underlying fetch's ProgressEvent, which the
 // viewer turns into a percentage.
-export function loadModelFile(filePath, glRenderer, onProgress) {
+export function loadModelFile(filePath: string, glRenderer?: THREE.WebGLRenderer, onProgress?: (event: ProgressEvent) => void) {
     return new Promise(async (resolve, reject) => {
         const ext = pathUtils.extname(filePath).toLowerCase();
         const url = toModelUrl(filePath);
-        const asMesh = (g) => {
+        const asMesh = (g: THREE.BufferGeometry) => {
             const useVertexColors = hasVertexColors(g);
             return new THREE.Mesh(g, new THREE.MeshStandardMaterial({
                 color: useVertexColors ? 0xffffff : 0x808080,
@@ -317,7 +328,7 @@ export function loadModelFile(filePath, glRenderer, onProgress) {
         // produces an empty picture. The dot size is a placeholder - it is
         // measured in world units, so only the caller, which knows the scale
         // the model ends up at, can set it (see tunePointSize in scene.js).
-        const asPoints = (g) => {
+        const asPoints = (g: THREE.BufferGeometry) => {
             const useVertexColors = hasVertexColors(g);
             return new THREE.Points(g, new THREE.PointsMaterial({
                 size: 1,
@@ -345,7 +356,7 @@ export function loadModelFile(filePath, glRenderer, onProgress) {
                         (gltf) => done(gltf.scene, gltf.animations), onProgress, reject);
                     break;
                 case '.obj':
-                    await loadOBJ(filePath, url, (obj) => done(obj), reject, onProgress);
+                    await loadOBJ(filePath, url, (obj: THREE.Group) => done(obj), reject, onProgress);
                     break;
                 case '.fbx': {
                     const { FBXLoader } = await LOADER_MODULES.fbx();
@@ -366,7 +377,8 @@ export function loadModelFile(filePath, glRenderer, onProgress) {
                 case '.dae': {
                     const { ColladaLoader } = await LOADER_MODULES.dae();
                     new ColladaLoader().load(url,
-                        (collada) => done(collada.scene, collada.scene.animations), onProgress, reject);
+                        (collada) => collada ? done(collada.scene, collada.scene.animations) : reject(new Error('Empty Collada file')),
+                        onProgress, reject);
                     break;
                 }
                 case '.3ds': {

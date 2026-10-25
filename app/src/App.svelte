@@ -577,7 +577,7 @@
   });
 </script>
 
-<div id="drop-zone" class:hidden={!showDrop} class:drag-over={dragging} on:click={openFileDialog} role="button" tabindex="0" on:keydown={(e) => e.key === 'Enter' && openFileDialog()}>
+<div id="drop-zone" class:hidden={!showDrop} class:drag-over={dragging} onclick={openFileDialog} role="button" tabindex="0" onkeydown={(e) => e.key === 'Enter' && openFileDialog()}>
   <div id="drop-message">
     <h1>3Dv</h1>
     <p>{t.drag_message}</p>
@@ -586,7 +586,7 @@
 </div>
 <div id="canvas-container" bind:this={container}></div>
 
-<div id="options-overlay" class:hidden={!showOptions} on:click={(e) => e.target === e.currentTarget && (showOptions = false)} role="presentation">
+<div id="options-overlay" class:hidden={!showOptions} onclick={(e) => e.target === e.currentTarget && (showOptions = false)} role="presentation">
   <div class="options-content">
     <h2>{t.options_title}</h2>
 
@@ -595,7 +595,7 @@
       <select
         id="lang-select"
         bind:value={currentLang}
-        on:change={() => persist('lang', currentLang)}
+        onchange={() => persist('lang', currentLang)}
       >
         <option value="en">English</option>
         <option value="ua">Українська</option>
@@ -608,17 +608,17 @@
         type="color"
         id="bg-color"
         bind:value={bgColor}
-        on:input={() => {
+        oninput={() => {
           (scene.background as THREE.Color).set(bgColor);
           requestRender();
         }}
-        on:change={() => persist('bgColor', bgColor)}
+        onchange={() => persist('bgColor', bgColor)}
       />
     </div>
 
     <div class="option-item">
       <label for="auto-rotate">{t.auto_rotate}</label>
-      <input type="checkbox" id="auto-rotate" bind:checked={autoRotate} on:change={() => persist('autoRotate', autoRotate)} />
+      <input type="checkbox" id="auto-rotate" bind:checked={autoRotate} onchange={() => persist('autoRotate', autoRotate)} />
     </div>
 
     <div class="option-item">
@@ -627,7 +627,7 @@
         type="checkbox"
         id="wireframe"
         bind:checked={wireframe}
-        on:change={() => {
+        onchange={() => {
           persist('wireframe', wireframe);
           if (currentModel) {
             eachMaterial(currentModel, (m: any) => (m.wireframe = wireframe));
@@ -643,7 +643,7 @@
         type="checkbox"
         id="show-grid"
         bind:checked={showGrid}
-        on:change={() => {
+        onchange={() => {
           if (gridHelper) gridHelper.visible = showGrid;
           requestRender();
           persist('showGrid', showGrid);
@@ -653,19 +653,19 @@
 
     <div class="option-item">
       <label for="single-window">{t.single_window}</label>
-      <input type="checkbox" id="single-window" bind:checked={singleWindow} on:change={() => persist('singleWindow', singleWindow)} />
+      <input type="checkbox" id="single-window" bind:checked={singleWindow} onchange={() => persist('singleWindow', singleWindow)} />
     </div>
 
     <div class="option-item">
-      <button id="reset-view" on:click={() => controls.reset()}>{t.reset_view}</button>
+      <button id="reset-view" onclick={() => controls.reset()}>{t.reset_view}</button>
     </div>
 
     <div class="option-item">
-      <button id="set-default" on:click={setAsDefault}>{t.set_default}</button>
+      <button id="set-default" onclick={setAsDefault}>{t.set_default}</button>
     </div>
 
     <div class="option-item">
-      <button id="licenses" on:click={() => (showLicenses = true)}>{t.licenses}</button>
+      <button id="licenses" onclick={() => (showLicenses = true)}>{t.licenses}</button>
     </div>
 
     <p class="hint">{t.hotkeys_hint}</p>

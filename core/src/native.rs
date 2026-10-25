@@ -62,13 +62,20 @@ fn with_renderer<T>(software: bool, f: impl FnOnce(&mut Renderer) -> Result<T, F
 }
 
 /// Creates the renderer ahead of the first request.
-#[cfg_attr(not(windows), allow(dead_code))] // only the Windows server warms up
 pub fn warm_up(software: bool) {
     let _ = with_renderer(software, |_| Ok(()));
 }
 
 /// Renders `path` into RGBA8 pixels, `size`×`size`.
 pub fn render_rgba(path: &Path, size: u32, software: bool) -> Result<Vec<u8>, Failure> {
+    // The device takes longer to create than most models take to load:
+    // without one yet, create it while the model loads. (A held lock means
+    // another thread is already at it.)
+    if let Ok(slot) = renderer_slot().try_lock() {
+        if slot.is_none() {
+            std::thread::spawn(move || warm_up(software));
+        }
+    }
     // Loading needs no GPU: done outside the renderer lock, so a server
     // reads several models in parallel.
     let prepared = match catch_unwind(|| dv3_render::prepare(path, size)) {

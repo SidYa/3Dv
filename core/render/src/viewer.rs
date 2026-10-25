@@ -20,8 +20,9 @@ use crate::scene::{AlphaMode, Material, Scene, Shading, Side, TextureRef, Topolo
 use crate::texture::Textures;
 
 /// Formats the viewer loads through Rust: the ones whose three.js parsers
-/// are slow on large files and that have no animation to keep.
-pub const VIEWER_EXTENSIONS: &[&str] = &["obj", "ply", "stl"];
+/// are slow on large files. FBX keeps FBXLoader for everything but reading
+/// the file and building geometry (see viewer_fbx.rs).
+pub const VIEWER_EXTENSIONS: &[&str] = &["obj", "ply", "stl", "fbx"];
 
 /// An f32 as the shortest decimal that reads back as it (0.65, not
 /// 0.6499999761581421), the value three's JS constant would have been.
@@ -55,6 +56,9 @@ pub fn load(path: &Path) -> Result<Vec<u8>, LoadError> {
     let ext = path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).unwrap_or_default();
     if !VIEWER_EXTENSIONS.contains(&ext.as_str()) {
         return Err(LoadError::Unsupported(format!("viewer .{ext}")));
+    }
+    if ext == "fbx" {
+        return crate::viewer_fbx::load(path);
     }
     // three's STLLoader reads binary STL about as fast as memory copies it;
     // only ASCII STL, which it parses with regular expressions, is worth it.

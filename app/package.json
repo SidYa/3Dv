@@ -20,6 +20,7 @@
     "@tauri-apps/plugin-opener": "^2.7.1",
     "@tsconfig/svelte": "^5.0.8",
     "@types/node": "^24.13.3",
+    "@types/three": "^0.186.0",
     "svelte": "^5.57.0",
     "svelte-check": "^4.7.6",
     "typescript": "~6.0.2",

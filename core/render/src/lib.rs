@@ -11,6 +11,7 @@ mod gpu;
 pub mod scene;
 pub mod texture;
 pub mod viewer;
+mod viewer_fbx;
 
 use std::path::Path;
 use std::time::{Duration, Instant};
