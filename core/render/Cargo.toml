@@ -10,7 +10,13 @@ publish = false
 pollster = "1"
 bytemuck = { version = "1", features = ["derive"] }
 glam = "0.34"
-gltf = { version = "1.4", default-features = false, features = ["import", "utils", "names", "KHR_texture_transform", "KHR_materials_unlit", "KHR_materials_emissive_strength", "KHR_materials_transmission", "KHR_materials_ior", "KHR_materials_specular", "KHR_materials_volume"] }
+serde_json = "1"
+# glTF compression: Draco meshes (pure Rust port of Google Draco), meshopt
+# streams (the official meshoptimizer library), KTX2/Basis Universal textures
+# (pure Rust port of the official transcoder).
+draco-core = { version = "2.3", default-features = false, features = ["decoder", "point_cloud_decode", "edgebreaker_valence_decode", "legacy_bitstream_decode"] }
+meshopt = "0.7"
+basisu = "0.1"
 ufbx = "0.11"
 roxmltree = "0.21"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "tga", "gif", "webp"] }

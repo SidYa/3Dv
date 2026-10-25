@@ -263,6 +263,18 @@ pub struct Material {
     pub size_attenuation: bool,
     /// three's material.blending = AdditiveBlending (3DS MAT_ADDITIVE).
     pub additive: bool,
+    // MeshPhysicalMaterial transmission (KHR_materials_transmission, _volume,
+    // _ior): drawn after the opaque objects, refracting a render of them.
+    pub transmission: f32,
+    /// R channel scales the transmission.
+    pub transmission_map: Option<TextureRef>,
+    pub ior: f32,
+    pub thickness: f32,
+    /// G channel scales the thickness.
+    pub thickness_map: Option<TextureRef>,
+    pub attenuation_distance: f32,
+    /// Linear.
+    pub attenuation_color: Vec3,
 }
 
 impl Material {
@@ -296,6 +308,13 @@ impl Material {
             point_size: 1.0,
             size_attenuation: true,
             additive: false,
+            transmission: 0.0,
+            transmission_map: None,
+            ior: 1.5,
+            thickness: 0.0,
+            thickness_map: None,
+            attenuation_distance: f32::INFINITY,
+            attenuation_color: Vec3::ONE,
         }
     }
 
@@ -334,6 +353,12 @@ impl Material {
 
     pub fn is_transparent(&self) -> bool {
         self.alpha_mode == AlphaMode::Blend
+    }
+
+    /// three puts these in their own render list, between the opaque and
+    /// the transparent objects, whatever their transparency.
+    pub fn is_transmissive(&self) -> bool {
+        self.transmission > 0.0
     }
 }
 

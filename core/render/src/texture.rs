@@ -15,7 +15,9 @@ use crate::scene::{Image, Scene};
 /// What happens to a texture that cannot be shown. three's TextureLoader
 /// hands out a texture that never receives an image when the file is missing
 /// or the browser cannot decode it; WebGL samples such a texture as black,
-/// so that is what the viewer shows. GLTFLoader instead drops the map.
+/// so that is what the viewer shows. GLTFLoader instead drops the map - and
+/// it is also the one loader with a KTX2 (Basis Universal) decoder, so
+/// `Skip` sources may be KTX2.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Missing {
     Black,
@@ -120,8 +122,8 @@ impl Textures {
                             let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             let Some(p) = pending.get(i) else { break };
                             let decoded = std::panic::catch_unwind(|| match &p.source {
-                                Source::File(path) => std::fs::read(path).ok().and_then(|bytes| decode_like_browser(&bytes, path, p.tga, max_size)),
-                                Source::Bytes(bytes) => decode_like_browser(bytes, Path::new(""), false, max_size),
+                                Source::File(path) => std::fs::read(path).ok().and_then(|bytes| decode_like_browser(&bytes, path, p.tga, p.missing == Missing::Skip, max_size)),
+                                Source::Bytes(bytes) => decode_like_browser(bytes, Path::new(""), false, p.missing == Missing::Skip, max_size),
                             })
                             .ok()
                             .flatten();
@@ -145,7 +147,7 @@ impl Textures {
         }
         if !dropped.is_empty() {
             for m in scene.materials.iter_mut() {
-                for slot in [&mut m.map, &mut m.emissive_map, &mut m.metal_rough_map, &mut m.normal_map, &mut m.bump_map, &mut m.ao_map, &mut m.alpha_map, &mut m.specular_map] {
+                for slot in [&mut m.map, &mut m.emissive_map, &mut m.metal_rough_map, &mut m.normal_map, &mut m.bump_map, &mut m.ao_map, &mut m.alpha_map, &mut m.specular_map, &mut m.transmission_map, &mut m.thickness_map] {
                     if slot.is_some_and(|t| dropped.contains(&t.image)) {
                         *slot = None;
                     }
@@ -174,8 +176,11 @@ impl Textures {
 
 /// Decodes an image if a browser would: PNG, JPEG, GIF, BMP and WebP by
 /// their signatures, TGA only when `tga` is set (by extension, it has no
-/// signature).
-fn decode_like_browser(bytes: &[u8], path: &Path, tga: bool, max_size: u32) -> Option<Image> {
+/// signature), KTX2 only when `ktx2` is set (GLTFLoader's KTX2Loader).
+fn decode_like_browser(bytes: &[u8], path: &Path, tga: bool, ktx2: bool, max_size: u32) -> Option<Image> {
+    if ktx2 && bytes.starts_with(&KTX2_MAGIC) {
+        return decode_ktx2(bytes, max_size);
+    }
     let browser = bytes.starts_with(&[0x89, b'P', b'N', b'G'])
         || bytes.starts_with(&[0xFF, 0xD8, 0xFF])
         || bytes.starts_with(b"GIF8")
@@ -190,6 +195,32 @@ fn decode_like_browser(bytes: &[u8], path: &Path, tga: bool, max_size: u32) -> O
         return Some(scaled(img, max_size));
     }
     None
+}
+
+const KTX2_MAGIC: [u8; 12] = [0xAB, 0x4B, 0x54, 0x58, 0x20, 0x32, 0x30, 0xBB, 0x0D, 0x0A, 0x1A, 0x0A];
+
+/// KTX2 with Basis Universal (ETC1S or UASTC) content, transcoded to RGBA8
+/// from the first mip level that fits `max_size`, so a 4K texture costs a
+/// 512-pixel transcode.
+fn decode_ktx2(bytes: &[u8], max_size: u32) -> Option<Image> {
+    let transcoder = basisu::Transcoder::new(bytes).ok()?;
+    let levels = transcoder.level_count();
+    let mut level = 0;
+    while level + 1 < levels {
+        let info = transcoder.image_level_info(level).ok()?;
+        if info.width.max(info.height) <= max_size {
+            break;
+        }
+        level += 1;
+    }
+    let info = transcoder.image_level_info(level).ok()?;
+    let rgba = transcoder.transcode(level, basisu::TargetFormat::Rgba32, basisu::DecodeFlags::NONE).ok()?;
+    let (w, h) = (info.width, info.height);
+    if w == 0 || h == 0 || rgba.len() < (w * h * 4) as usize {
+        return None;
+    }
+    let buffer = image::RgbaImage::from_raw(w, h, rgba[..(w * h * 4) as usize].to_vec())?;
+    Some(scaled(image::DynamicImage::ImageRgba8(buffer), max_size))
 }
 
 fn scaled(img: image::DynamicImage, max_size: u32) -> Image {
