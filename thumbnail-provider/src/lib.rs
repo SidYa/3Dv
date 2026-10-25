@@ -6,9 +6,10 @@
 // So nothing heavy happens here. A thumbnail is asked of the thumbnail
 // server in 3Dv.exe (thumb_server.rs) over a named pipe; the server is
 // started on first use and keeps its GPU device warm while Explorer works
-// through a folder. Should the server fail on a model, the old path runs:
+// through a folder. Should the server be unreachable or its renderer fail,
+// a one-off process renders the model instead:
 //
-//     3Dv.exe 3dv-thumbnail --3dv-webview "<model>" "<temp.png>"
+//     3Dv.exe 3dv-thumbnail "<model>" "<temp.png>"
 //
 // whose PNG is decoded here. There is deliberately no cache of our own:
 // Explorer keeps the result in its thumbnail cache like any other file
@@ -59,7 +60,7 @@ const SERVER_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a freshly started server may take to open its pipe.
 const SERVER_START_TIMEOUT: Duration = Duration::from_secs(10);
 /// A folder full of models makes Explorer ask for many thumbnails at once,
-/// and every fallback render is a full WebView process. Two at a time keeps
+/// and every fallback render is a 3Dv process of its own. Two at a time keeps
 /// the machine usable; the rest wait their turn.
 const MAX_CONCURRENT_CLI: i32 = 2;
 const CLI_SEMAPHORE: &str = "Local\\3Dv.ThumbnailRenders";
@@ -242,8 +243,10 @@ extern "system" fn DllUnregisterServer() -> HRESULT {
 fn thumbnail(path: &str, cx: u32) -> Option<*mut c_void> {
     let exe = viewer_executable()?;
     let size = cx.clamp(protocol::MIN_SIZE, protocol::MAX_SIZE);
-    if let Some((w, h, bgra)) = ask_server(&exe, path, size) {
-        return dib_section(w, h, &bgra);
+    match ask_server(&exe, path, size) {
+        Answer::Picture(w, h, bgra) => return dib_section(w, h, &bgra),
+        Answer::NoPicture => return None,
+        Answer::Unavailable => {}
     }
     let (w, h, rgba) = run_cli(&exe, path)?;
     let (w, h, rgba) = fit(w, h, rgba, cx.max(1));
@@ -462,17 +465,33 @@ fn kill_on_close_job() -> F::HANDLE {
     job
 }
 
-/// (width, height, BGRA) from the server, or None to fall back.
-fn ask_server(exe: &str, path: &str, size: u32) -> Option<(u32, u32, Vec<u8>)> {
-    let deadline = Instant::now() + SERVER_TIMEOUT;
-    let mut pipe = connect(exe, (Instant::now() + SERVER_START_TIMEOUT).min(deadline))?;
-    pipe.deadline = deadline;
-    protocol::write_request(&mut pipe, path, size).ok()?;
-    let (status, w, h, bgra) = protocol::read_response(&mut pipe).ok()?;
-    (status == protocol::STATUS_OK).then_some((w, h, bgra))
+enum Answer {
+    /// width, height, BGRA
+    Picture(u32, u32, Vec<u8>),
+    /// The model gives no picture; the CLI would not do better.
+    NoPicture,
+    /// No server, a timeout, or its renderer failed: worth the CLI.
+    Unavailable,
 }
 
-// --- the WebView fallback -------------------------------------------------
+fn ask_server(exe: &str, path: &str, size: u32) -> Answer {
+    let deadline = Instant::now() + SERVER_TIMEOUT;
+    let Some(mut pipe) = connect(exe, (Instant::now() + SERVER_START_TIMEOUT).min(deadline)) else { return Answer::Unavailable };
+    pipe.deadline = deadline;
+    if protocol::write_request(&mut pipe, path, size).is_err() {
+        return Answer::Unavailable;
+    }
+    match protocol::read_response(&mut pipe) {
+        Ok((protocol::STATUS_OK, w, h, bgra)) => Answer::Picture(w, h, bgra),
+        Ok((protocol::STATUS_NO_PICTURE, ..)) => Answer::NoPicture,
+        _ => Answer::Unavailable,
+    }
+}
+
+// --- the CLI fallback -----------------------------------------------------
+// For when the server cannot be reached or its renderer failed: a fresh
+// 3Dv process renders the one model, and if the GPU fails it there, once
+// more on the software rasterizer.
 
 /// Runs the CLI inside a job object that kills the whole process tree when
 /// the handle closes - on timeout, and also if Explorer itself goes away
@@ -483,7 +502,7 @@ fn run_cli_once(exe: &str, model: &str, output: &str, software: bool) -> u32 {
     if software {
         cmd.push_str(" --3dv-software");
     }
-    cmd.push_str(&format!(" --3dv-webview 3dv-thumbnail \"{model}\" \"{output}\""));
+    cmd.push_str(&format!(" 3dv-thumbnail \"{model}\" \"{output}\""));
     let mut command = wide(&cmd);
     let job = kill_on_close_job();
     let mut si: Th::STARTUPINFOW = unsafe { std::mem::zeroed() };

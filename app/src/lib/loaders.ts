@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 
 // Each format's loader is fetched the first time a file of that format is
-// opened. A viewer or thumbnail process only ever needs one or two of
+// opened. A viewer window only ever needs one or two of
 // them, so the rest are neither downloaded nor parsed at startup.
 const LOADER_MODULES = {
     gltf: () => Promise.all([

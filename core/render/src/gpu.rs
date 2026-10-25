@@ -1,7 +1,9 @@
 // Offscreen wgpu renderer for thumbnails: draws a finished Scene the way
 // Thumbnail.svelte does with three.js - square frame, 60° camera looking from
 // scene.ts's VIEW_DIRECTION, studio lights plus the baked RoomEnvironment,
-// 4x MSAA, opaque objects first and transparent ones back to front.
+// 4x MSAA. Render lists as in WebGLRenderer: opaque objects, then
+// transmissive ones (glass, refracting a mipmapped render of the opaque
+// scene, three's transmission pass), then transparent ones back to front.
 //
 // One Renderer owns a device and is reused for many thumbnails; pipelines
 // and the environment textures are created once.
@@ -12,19 +14,23 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
-use crate::scene::{AlphaMode, Framing, Image, Material, Scene, Shading, Side, Topology, Wrap};
+use crate::scene::{srgb_to_linear, AlphaMode, Framing, Image, Material, Scene, Shading, Side, Topology, Wrap};
 
 /// Thumbnail.svelte / scene.ts constants.
-const BACKGROUND: [f64; 3] = [0x1a as f64 / 255.0, 0x1a as f64 / 255.0, 0x1a as f64 / 255.0];
+const BACKGROUND: f64 = 0x1a as f64 / 255.0;
 const FOV_DEGREES: f32 = 60.0;
 const FRAME_PADDING: f32 = 1.08;
 const ENVIRONMENT_INTENSITY: f32 = 0.5;
 const SAMPLES: u32 = 4;
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+/// three's transmission render target is HalfFloat.
+const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// Thumbnail.svelte's empty-frame probe.
 const PROBE_TOLERANCE: i32 = 5;
 const PROBE_STEP: u32 = 4;
+/// Material texture slots, in shader order.
+const SLOTS: usize = 10;
 
 #[derive(Debug)]
 pub enum RenderError {
@@ -73,6 +79,7 @@ struct FrameUniform {
     light_color: [[f32; 4]; 3],
     ambient: [f32; 4],
     params: [f32; 4],
+    params2: [f32; 4],
 }
 
 #[repr(C)]
@@ -84,7 +91,9 @@ struct MaterialUniform {
     pbr: [f32; 4],
     extra: [f32; 4],
     flags: [u32; 4],
-    uv_rows: [[f32; 4]; 16],
+    transmission: [f32; 4],
+    attenuation: [f32; 4],
+    uv_rows: [[f32; 4]; SLOTS * 2],
 }
 
 const F_VERTEX_COLORS: u32 = 1;
@@ -108,6 +117,31 @@ struct PipelineKey {
     cull: u8,
     blend: Blend,
     depth_write: bool,
+    /// Drawing the linear transmission source instead of the 8-bit canvas.
+    hdr: bool,
+}
+
+/// How a material is drawn in one pass.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Pass {
+    /// As the material says.
+    Normal,
+    /// A transparent double-sided material's back faces (three draws them
+    /// as BackSide first), or a transmissive one's for the transmission
+    /// source.
+    BackFaces,
+    /// Then its front faces.
+    FrontFaces,
+}
+
+#[derive(Clone, Copy)]
+struct Draw {
+    mesh: usize,
+    start: u32,
+    count: u32,
+    material: usize,
+    pass: Pass,
+    depth: f32,
 }
 
 pub struct Renderer {
@@ -118,15 +152,36 @@ pub struct Renderer {
     material_layout: wgpu::BindGroupLayout,
     pipeline_layout: wgpu::PipelineLayout,
     pipelines: HashMap<PipelineKey, wgpu::RenderPipeline>,
+    mip_pipeline: wgpu::RenderPipeline,
+    mip_layout: wgpu::BindGroupLayout,
     env_view: wgpu::TextureView,
     dfg_view: wgpu::TextureView,
     linear_clamp: wgpu::Sampler,
+    mip_sampler: wgpu::Sampler,
     white: wgpu::TextureView,
     samplers: HashMap<(Wrap, Wrap), wgpu::Sampler>,
     max_buffer: u64,
     max_texture: u32,
     pub adapter: String,
 }
+
+const MIP_SHADER: &str = r#"
+// A mip level from the one above it: bilinear at the centre of each 2x2
+// block, the box filter of generateMipmap.
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var smp: sampler;
+struct Out { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
+@vertex fn vs(@builtin(vertex_index) i: u32) -> Out {
+    let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+    var o: Out;
+    o.pos = vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+    o.uv = vec2<f32>(p.x, 1.0 - p.y);
+    return o;
+}
+@fragment fn fs(o: Out) -> @location(0) vec4<f32> {
+    return textureSampleLevel(src, smp, o.uv, 0.0);
+}
+"#;
 
 impl Renderer {
     /// Creates a renderer on the best available GPU, or on a software
@@ -159,8 +214,6 @@ impl Renderer {
         limits.max_buffer_size = adapter_limits.max_buffer_size;
         limits.max_storage_buffer_binding_size = adapter_limits.max_storage_buffer_binding_size;
         limits.max_texture_dimension_2d = adapter_limits.max_texture_dimension_2d;
-        limits.max_sampled_textures_per_shader_stage = adapter_limits.max_sampled_textures_per_shader_stage.max(16).min(adapter_limits.max_sampled_textures_per_shader_stage);
-        limits.max_samplers_per_shader_stage = adapter_limits.max_samplers_per_shader_stage;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("3Dv thumbnails"),
             required_features: wgpu::Features::empty(),
@@ -178,19 +231,14 @@ impl Renderer {
 
         let frame_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("frame"),
-            entries: &[
-                uniform_entry(0),
-                texture_entry(1),
-                sampler_entry(2),
-                texture_entry(3),
-            ],
+            entries: &[uniform_entry(0), texture_entry(1), sampler_entry(2), texture_entry(3), texture_entry(4), sampler_entry(5)],
         });
         let mut material_entries = vec![uniform_entry(0)];
-        for i in 0..8 {
+        for i in 0..SLOTS as u32 {
             material_entries.push(texture_entry(1 + i));
         }
-        for i in 0..8 {
-            material_entries.push(sampler_entry(9 + i));
+        for i in 0..SLOTS as u32 {
+            material_entries.push(sampler_entry(1 + SLOTS as u32 + i));
         }
         let material_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("material"), entries: &material_entries });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -199,8 +247,28 @@ impl Renderer {
             immediate_size: 0,
         });
 
+        let mip_module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("mipmaps"), source: wgpu::ShaderSource::Wgsl(MIP_SHADER.into()) });
+        let mip_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("mipmaps"), entries: &[texture_entry(0), sampler_entry(1)] });
+        let mip_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("mipmaps"), bind_group_layouts: &[Some(&mip_layout)], immediate_size: 0 });
+        let mip_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mipmaps"),
+            layout: Some(&mip_pipeline_layout),
+            vertex: wgpu::VertexState { module: &mip_module, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[] },
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &mip_module,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState { format: HDR_FORMAT, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
         let (env_w, env_h, env_texels) = crate::env::room_pmrem();
-        let env_view = create_texture(&device, &queue, "room pmrem", env_w, env_h, wgpu::TextureFormat::Rgba16Float, &[(env_w, env_h, bytemuck::cast_slice(&env_texels).to_vec())]);
+        let env_view = create_texture(&device, &queue, "room pmrem", env_w, env_h, HDR_FORMAT, &[(env_w, env_h, bytemuck::cast_slice(&env_texels).to_vec())]);
         let dfg = crate::env::dfg_lut();
         let dfg_view = create_texture(&device, &queue, "dfg lut", 16, 16, wgpu::TextureFormat::Rg16Float, &[(16, 16, bytemuck::cast_slice(&dfg).to_vec())]);
         let white = create_texture(&device, &queue, "white", 1, 1, wgpu::TextureFormat::Rgba8Unorm, &[(1, 1, vec![255, 255, 255, 255])]);
@@ -208,6 +276,13 @@ impl Renderer {
             label: Some("linear clamp"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let mip_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("linear mip clamp"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         });
 
@@ -219,9 +294,12 @@ impl Renderer {
             material_layout,
             pipeline_layout,
             pipelines: HashMap::new(),
+            mip_pipeline,
+            mip_layout,
             env_view,
             dfg_view,
             linear_clamp,
+            mip_sampler,
             white,
             samplers: HashMap::new(),
             max_buffer: limits.max_buffer_size,
@@ -234,7 +312,7 @@ impl Renderer {
     /// thumbnail does not wait for them.
     pub fn warm_up(&mut self) {
         for cull in [2u8, 0] {
-            self.pipeline(PipelineKey { topology: 0, cull, blend: Blend::None, depth_write: true });
+            self.pipeline(PipelineKey { topology: 0, cull, blend: Blend::None, depth_write: true, hdr: false });
         }
     }
 
@@ -303,7 +381,7 @@ impl Renderer {
                 module: &self.shader,
                 entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState { format: COLOR_FORMAT, blend, write_mask: wgpu::ColorWrites::ALL })],
+                targets: &[Some(wgpu::ColorTargetState { format: if key.hdr { HDR_FORMAT } else { COLOR_FORMAT }, blend, write_mask: wgpu::ColorWrites::ALL })],
             }),
             multiview_mask: None,
             cache: None,
@@ -330,6 +408,22 @@ impl Renderer {
                 })
             })
             .clone()
+    }
+
+    fn frame_group(&self, frame: &FrameUniform, transmission: &wgpu::TextureView) -> wgpu::BindGroup {
+        let buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("frame"), contents: bytemuck::bytes_of(frame), usage: wgpu::BufferUsages::UNIFORM });
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("frame"),
+            layout: &self.frame_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.env_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.linear_clamp) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.dfg_view) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(transmission) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.mip_sampler) },
+            ],
+        })
     }
 
     /// Renders the scene into a `size`×`size` RGBA image (top row first).
@@ -364,18 +458,8 @@ impl Renderer {
             light_color,
             ambient: [0.12, 0.12, 0.12, 0.0],
             params: [ENVIRONMENT_INTENSITY, size as f32, size as f32, 0.0],
+            params2: [0.0; 4],
         };
-        let frame_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("frame"), contents: bytemuck::bytes_of(&frame), usage: wgpu::BufferUsages::UNIFORM });
-        let frame_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("frame"),
-            layout: &self.frame_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: frame_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.env_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.linear_clamp) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.dfg_view) },
-            ],
-        });
 
         // --- geometry -----------------------------------------------------------
         struct Gpu {
@@ -415,65 +499,82 @@ impl Renderer {
             }
         }
 
-        // --- materials ------------------------------------------------------------
-        let mut textures: HashMap<(usize, bool), wgpu::TextureView> = HashMap::new();
-        let mut material_groups: HashMap<(usize, u8), wgpu::BindGroup> = HashMap::new();
-
-        // --- draw list --------------------------------------------------------------
-        struct Draw {
-            mesh: usize,
-            start: u32,
-            count: u32,
-            material: usize,
-            /// 0: as the material says, 1: back faces of a transparent
-            /// double-sided material, 2: its front faces.
-            pass: u8,
-            depth: f32,
-        }
+        // --- render lists (WebGLRenderLists) ----------------------------------
         let mut opaque = Vec::new();
+        let mut transmissive = Vec::new();
         let mut transparent = Vec::new();
         for (mi, mesh) in scene.meshes.iter().enumerate() {
             let z = view.transform_point3(mesh.origin).z;
             for g in &mesh.groups {
                 let m = &scene.materials[g.material];
-                let d = Draw { mesh: mi, start: g.start, count: g.count, material: g.material, pass: 0, depth: z };
-                if m.is_transparent() {
+                let d = |pass| Draw { mesh: mi, start: g.start, count: g.count, material: g.material, pass, depth: z };
+                if m.is_transmissive() && mesh.topology == Topology::Triangles {
+                    transmissive.push(d(Pass::Normal));
+                } else if m.is_transparent() {
                     if m.side == Side::Double && mesh.topology == Topology::Triangles {
-                        transparent.push(Draw { pass: 1, ..d });
-                        transparent.push(Draw { mesh: mi, start: g.start, count: g.count, material: g.material, pass: 2, depth: z });
+                        transparent.push(d(Pass::BackFaces));
+                        transparent.push(d(Pass::FrontFaces));
                     } else {
-                        transparent.push(d);
+                        transparent.push(d(Pass::Normal));
                     }
                 } else {
-                    opaque.push(d);
+                    opaque.push(d(Pass::Normal));
                 }
             }
         }
         // Back to front: the most negative view-space z first. The sort is
         // stable, so the back/front passes of one object stay in order.
-        transparent.sort_by(|a, b| a.depth.partial_cmp(&b.depth).unwrap_or(std::cmp::Ordering::Equal));
+        let back_to_front = |a: &Draw, b: &Draw| a.depth.partial_cmp(&b.depth).unwrap_or(std::cmp::Ordering::Equal);
+        transmissive.sort_by(back_to_front);
+        transparent.sort_by(back_to_front);
 
-        for d in opaque.iter().chain(transparent.iter()) {
-            let key = (d.material, d.pass);
-            if material_groups.contains_key(&key) {
-                continue;
-            }
-            let group = self.material_group(scene, d.material, d.pass, scene.meshes[d.mesh].topology, &mut textures);
-            material_groups.insert(key, group);
-        }
+        let mut cache = Cache::default();
+        let buffers: Vec<(&wgpu::Buffer, Option<&wgpu::Buffer>, bool)> = meshes.iter().map(|g| (&g.vertices, g.indices.as_ref(), g.points)).collect();
 
-        // --- targets ------------------------------------------------------------------
         let extent = wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 };
-        let msaa = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("msaa"),
-            size: extent,
-            mip_level_count: 1,
-            sample_count: SAMPLES,
-            dimension: wgpu::TextureDimension::D2,
-            format: COLOR_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("thumbnail") });
+
+        // --- three's renderTransmissionPass --------------------------------------
+        let transmission_view = if transmissive.is_empty() {
+            self.white.clone()
+        } else {
+            // The opaque scene, linear and not tone mapped, into a mipmapped
+            // HalfFloat target; then the back faces of double-sided
+            // transmissive objects on top of it (they refract that first
+            // render), resolved into a second texture to avoid sampling the
+            // one being written.
+            let hdr_frame = FrameUniform { params2: [1.0, 0.0, 0.0, 0.0], ..frame };
+            let msaa = self.target("transmission msaa", extent, HDR_FORMAT, SAMPLES, 1);
+            let depth = self.target("transmission depth", extent, DEPTH_FORMAT, SAMPLES, 1);
+            let levels = 32 - size.leading_zeros();
+            let first = self.target("transmission", extent, HDR_FORMAT, 1, levels);
+            let keys = self.prepare(scene, &opaque, true, &mut cache);
+            let white = self.white.clone();
+            let group = self.frame_group(&hdr_frame, &white);
+            self.draw_pass(&mut encoder, &msaa, &first, &depth, true, &group, &opaque, &keys, &buffers, &cache.groups);
+            self.mipmaps(&mut encoder, &first, levels);
+
+            let back: Vec<Draw> = transmissive
+                .iter()
+                .filter(|d| scene.materials[d.material].side == Side::Double)
+                .map(|d| Draw { pass: Pass::BackFaces, ..*d })
+                .collect();
+            if back.is_empty() {
+                first.create_view(&Default::default())
+            } else {
+                let second = self.target("transmission 2", extent, HDR_FORMAT, 1, levels);
+                let keys = self.prepare(scene, &back, true, &mut cache);
+                let group = self.frame_group(&hdr_frame, &first.create_view(&Default::default()));
+                self.draw_pass(&mut encoder, &msaa, &second, &depth, false, &group, &back, &keys, &buffers, &cache.groups);
+                self.mipmaps(&mut encoder, &second, levels);
+                second.create_view(&Default::default())
+            }
+        };
+
+        // --- the canvas ---------------------------------------------------------------
+        let all: Vec<Draw> = opaque.iter().chain(transmissive.iter()).chain(transparent.iter()).copied().collect();
+        let keys = self.prepare(scene, &all, false, &mut cache);
+        let msaa = self.target("msaa", extent, COLOR_FORMAT, SAMPLES, 1);
         let resolve = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("resolve"),
             size: extent,
@@ -484,68 +585,9 @@ impl Renderer {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
-        let depth = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("depth"),
-            size: extent,
-            mip_level_count: 1,
-            sample_count: SAMPLES,
-            dimension: wgpu::TextureDimension::D2,
-            format: DEPTH_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        let msaa_view = msaa.create_view(&Default::default());
-        let resolve_view = resolve.create_view(&Default::default());
-        let depth_view = depth.create_view(&Default::default());
-
-        // Pipelines first: the pass borrows them.
-        let mut keys = Vec::with_capacity(opaque.len() + transparent.len());
-        for d in opaque.iter().chain(transparent.iter()) {
-            let m = &scene.materials[d.material];
-            let topology = scene.meshes[d.mesh].topology;
-            let key = pipeline_key(m, topology, d.pass);
-            self.pipeline(key);
-            keys.push(key);
-        }
-
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("thumbnail") });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("thumbnail"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &msaa_view,
-                    depth_slice: None,
-                    resolve_target: Some(&resolve_view),
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: BACKGROUND[0], g: BACKGROUND[1], b: BACKGROUND[2], a: 1.0 }),
-                        store: wgpu::StoreOp::Discard,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &depth_view,
-                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_bind_group(0, &frame_group, &[]);
-            for (d, key) in opaque.iter().chain(transparent.iter()).zip(keys) {
-                let gpu = &meshes[d.mesh];
-                pass.set_pipeline(&self.pipelines[&key]);
-                pass.set_bind_group(1, &material_groups[&(d.material, d.pass)], &[]);
-                pass.set_vertex_buffer(0, gpu.vertices.slice(..));
-                if gpu.points {
-                    pass.draw(0..6, d.start..d.start + d.count);
-                } else if let Some(indices) = &gpu.indices {
-                    pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(d.start..d.start + d.count, 0, 0..1);
-                } else {
-                    pass.draw(d.start..d.start + d.count, 0..1);
-                }
-            }
-        }
+        let depth = self.target("depth", extent, DEPTH_FORMAT, SAMPLES, 1);
+        let group = self.frame_group(&frame, &transmission_view);
+        self.draw_pass(&mut encoder, &msaa, &resolve, &depth, true, &group, &all, &keys, &buffers, &cache.groups);
 
         // --- read back ---------------------------------------------------------------
         let row = size * 4;
@@ -589,6 +631,128 @@ impl Renderer {
         Ok(pixels)
     }
 
+    /// Material bind groups and pipelines for a list of draws; returns the
+    /// pipeline of each draw.
+    fn prepare(&mut self, scene: &Scene, draws: &[Draw], hdr: bool, cache: &mut Cache) -> Vec<PipelineKey> {
+        let mut keys = Vec::with_capacity(draws.len());
+        for d in draws {
+            let topology = scene.meshes[d.mesh].topology;
+            if !cache.groups.contains_key(&(d.material, d.pass)) {
+                let group = self.material_group(scene, d.material, d.pass, topology, &mut cache.textures);
+                cache.groups.insert((d.material, d.pass), group);
+            }
+            let key = PipelineKey { hdr, ..pipeline_key(&scene.materials[d.material], topology, d.pass) };
+            self.pipeline(key);
+            keys.push(key);
+        }
+        keys
+    }
+
+    fn target(&self, label: &str, extent: wgpu::Extent3d, format: wgpu::TextureFormat, samples: u32, levels: u32) -> wgpu::Texture {
+        let mut usage = wgpu::TextureUsages::RENDER_ATTACHMENT;
+        if samples == 1 && format != DEPTH_FORMAT {
+            usage |= wgpu::TextureUsages::TEXTURE_BINDING;
+        }
+        self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: extent,
+            mip_level_count: levels,
+            sample_count: samples,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage,
+            view_formats: &[],
+        })
+    }
+
+    /// One multisampled pass resolved into mip 0 of `resolve`. `clear` starts
+    /// from the background; otherwise the multisampled target keeps what the
+    /// previous pass drew.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        msaa: &wgpu::Texture,
+        resolve: &wgpu::Texture,
+        depth: &wgpu::Texture,
+        clear: bool,
+        frame_group: &wgpu::BindGroup,
+        draws: &[Draw],
+        keys: &[PipelineKey],
+        meshes: &[(&wgpu::Buffer, Option<&wgpu::Buffer>, bool)],
+        materials: &HashMap<(usize, Pass), wgpu::BindGroup>,
+    ) {
+        let hdr = msaa.format() == HDR_FORMAT;
+        // The background: sRGB-encoded on the canvas, linear in the
+        // transmission source.
+        let bg = if hdr { srgb_to_linear(BACKGROUND as f32) as f64 } else { BACKGROUND };
+        let msaa_view = msaa.create_view(&Default::default());
+        let resolve_view = resolve.create_view(&wgpu::TextureViewDescriptor { base_mip_level: 0, mip_level_count: Some(1), ..Default::default() });
+        let depth_view = depth.create_view(&Default::default());
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("thumbnail"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &msaa_view,
+                depth_slice: None,
+                resolve_target: Some(&resolve_view),
+                ops: wgpu::Operations {
+                    load: if clear { wgpu::LoadOp::Clear(wgpu::Color { r: bg, g: bg, b: bg, a: 1.0 }) } else { wgpu::LoadOp::Load },
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &depth_view,
+                depth_ops: Some(wgpu::Operations { load: if clear { wgpu::LoadOp::Clear(1.0) } else { wgpu::LoadOp::Load }, store: wgpu::StoreOp::Store }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_bind_group(0, frame_group, &[]);
+        for (d, key) in draws.iter().zip(keys) {
+            let (vertices, indices, points) = meshes[d.mesh];
+            pass.set_pipeline(&self.pipelines[key]);
+            pass.set_bind_group(1, &materials[&(d.material, d.pass)], &[]);
+            pass.set_vertex_buffer(0, vertices.slice(..));
+            if points {
+                pass.draw(0..6, d.start..d.start + d.count);
+            } else if let Some(indices) = indices {
+                pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(d.start..d.start + d.count, 0, 0..1);
+            } else {
+                pass.draw(d.start..d.start + d.count, 0..1);
+            }
+        }
+    }
+
+    /// generateMipmap for the transmission source.
+    fn mipmaps(&self, encoder: &mut wgpu::CommandEncoder, texture: &wgpu::Texture, levels: u32) {
+        for level in 1..levels {
+            let src = texture.create_view(&wgpu::TextureViewDescriptor { base_mip_level: level - 1, mip_level_count: Some(1), ..Default::default() });
+            let dst = texture.create_view(&wgpu::TextureViewDescriptor { base_mip_level: level, mip_level_count: Some(1), ..Default::default() });
+            let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("mipmap"),
+                layout: &self.mip_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&src) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.linear_clamp) },
+                ],
+            });
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("mipmap"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &dst, depth_slice: None, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store } })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.mip_pipeline);
+            pass.set_bind_group(0, &group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+    }
+
     fn buffer(&self, contents: &[u8], usage: wgpu::BufferUsages) -> Result<wgpu::Buffer, RenderError> {
         if contents.len() as u64 > self.max_buffer {
             return Err(RenderError::Gpu("buffer too large".into()));
@@ -610,7 +774,7 @@ impl Renderer {
         view
     }
 
-    fn material_group(&mut self, scene: &Scene, index: usize, pass: u8, topology: Topology, cache: &mut HashMap<(usize, bool), wgpu::TextureView>) -> wgpu::BindGroup {
+    fn material_group(&mut self, scene: &Scene, index: usize, pass: Pass, topology: Topology, cache: &mut HashMap<(usize, bool), wgpu::TextureView>) -> wgpu::BindGroup {
         let m: &Material = &scene.materials[index];
         let mut flags = 0u32;
         if m.vertex_colors {
@@ -620,9 +784,9 @@ impl Renderer {
             flags |= F_FLAT;
         }
         match (m.side, pass) {
-            (Side::Double, 0) => flags |= F_DOUBLE_SIDED,
-            // Transparent double-sided: rendered as BackSide, then FrontSide.
-            (Side::Double, 1) | (Side::Back, _) => flags |= F_BACK_SIDE,
+            (Side::Double, Pass::Normal) => flags |= F_DOUBLE_SIDED,
+            // Rendered as BackSide, then FrontSide.
+            (Side::Double, Pass::BackFaces) | (Side::Back, _) => flags |= F_BACK_SIDE,
             _ => {}
         }
         if !m.is_transparent() {
@@ -641,13 +805,13 @@ impl Renderer {
             (Shading::Lambert, _) => 2,
             (Shading::Basic, _) => 3,
         };
-        let slots = [m.map, m.emissive_map, m.metal_rough_map, m.normal_map, m.bump_map, m.ao_map, m.alpha_map, m.specular_map];
-        let srgb = [true, true, false, false, false, false, false, false];
+        let slots = [m.map, m.emissive_map, m.metal_rough_map, m.normal_map, m.bump_map, m.ao_map, m.alpha_map, m.specular_map, m.transmission_map, m.thickness_map];
+        let srgb = [true, true, false, false, false, false, false, false, false, false];
         let mut present = 0u32;
         let mut on_uv1 = 0u32;
-        let mut uv_rows = [[0.0f32; 4]; 16];
-        let mut views = Vec::with_capacity(8);
-        let mut samplers = Vec::with_capacity(8);
+        let mut uv_rows = [[0.0f32; 4]; SLOTS * 2];
+        let mut views = Vec::with_capacity(SLOTS);
+        let mut samplers = Vec::with_capacity(SLOTS);
         for (i, slot) in slots.iter().enumerate() {
             match slot.filter(|t| t.image < scene.images.len()) {
                 Some(t) => {
@@ -670,6 +834,7 @@ impl Renderer {
             }
         }
         let alpha_test = if let AlphaMode::Mask(c) = m.alpha_mode { c } else { 0.0 };
+        let attenuation_distance = if m.attenuation_distance.is_finite() { m.attenuation_distance } else { f32::MAX };
         let uniform = MaterialUniform {
             color: [m.color.x, m.color.y, m.color.z, m.opacity],
             emissive: [m.emissive.x, m.emissive.y, m.emissive.z, 0.0],
@@ -677,6 +842,8 @@ impl Renderer {
             pbr: [m.roughness, m.metalness, m.ao_intensity, alpha_test],
             extra: [m.normal_scale.x, m.normal_scale.y, m.bump_scale, m.point_size],
             flags: [shading, flags, present, on_uv1],
+            transmission: [m.transmission, m.ior, m.thickness, attenuation_distance],
+            attenuation: [m.attenuation_color.x, m.attenuation_color.y, m.attenuation_color.z, 0.0],
             uv_rows,
         };
         let buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("material"), contents: bytemuck::bytes_of(&uniform), usage: wgpu::BufferUsages::UNIFORM });
@@ -685,13 +852,20 @@ impl Renderer {
             entries.push(wgpu::BindGroupEntry { binding: 1 + i as u32, resource: wgpu::BindingResource::TextureView(v) });
         }
         for (i, s) in samplers.iter().enumerate() {
-            entries.push(wgpu::BindGroupEntry { binding: 9 + i as u32, resource: wgpu::BindingResource::Sampler(s) });
+            entries.push(wgpu::BindGroupEntry { binding: 1 + SLOTS as u32 + i as u32, resource: wgpu::BindingResource::Sampler(s) });
         }
         self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("material"), layout: &self.material_layout, entries: &entries })
     }
 }
 
-fn pipeline_key(m: &Material, topology: Topology, pass: u8) -> PipelineKey {
+/// GPU resources of one render, shared by its passes.
+#[derive(Default)]
+struct Cache {
+    textures: HashMap<(usize, bool), wgpu::TextureView>,
+    groups: HashMap<(usize, Pass), wgpu::BindGroup>,
+}
+
+fn pipeline_key(m: &Material, topology: Topology, pass: Pass) -> PipelineKey {
     let topology_id = match topology {
         Topology::Triangles => 0,
         Topology::Lines => 1,
@@ -702,9 +876,9 @@ fn pipeline_key(m: &Material, topology: Topology, pass: u8) -> PipelineKey {
         0
     } else {
         match (m.side, pass) {
-            (Side::Double, 1) => 1,
-            (Side::Double, 2) => 2,
-            (Side::Double, _) => 0,
+            (Side::Double, Pass::BackFaces) => 1,
+            (Side::Double, Pass::FrontFaces) => 2,
+            (Side::Double, Pass::Normal) => 0,
             (Side::Back, _) => 1,
             (Side::Front, _) => 2,
         }
@@ -716,7 +890,7 @@ fn pipeline_key(m: &Material, topology: Topology, pass: u8) -> PipelineKey {
     } else {
         Blend::Normal
     };
-    PipelineKey { topology: topology_id, cull, blend, depth_write: m.depth_write }
+    PipelineKey { topology: topology_id, cull, blend, depth_write: m.depth_write, hdr: false }
 }
 
 /// Object3D.lookAt for a camera: right-handed, looking down -Z.

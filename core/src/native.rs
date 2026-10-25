@@ -1,16 +1,26 @@
-// The native (Rust + wgpu) thumbnail renderer, shared by the 3dv-thumbnail
-// CLI, the Linux thumbnail cache and the Windows thumbnail server. Every
-// failure returns None and the caller falls back to the WebView renderer,
-// which stays the reference for anything the native loaders cannot handle.
+// The thumbnail renderer (core/render: Rust loaders + wgpu), shared by the
+// 3dv-thumbnail CLI, the Linux thumbnail cache and the Windows thumbnail
+// server.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
-use dv3_render::Renderer;
+use dv3_render::{RenderError, Renderer, ThumbnailError};
 
 /// Size of the thumbnails the CLI and the freedesktop cache store.
 pub const THUMB_SIZE: u32 = 256;
+
+/// Why there is no thumbnail.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Failure {
+    /// The model itself gives no picture: unreadable, nothing to draw, or
+    /// nothing in view. Trying again will not change that.
+    NoPicture,
+    /// The renderer failed (no device, a device error, a crash); another
+    /// attempt, possibly on the software rasterizer, may succeed.
+    Renderer,
+}
 
 /// One device per process, created on first use and kept warm.
 fn renderer_slot() -> &'static Mutex<Option<Renderer>> {
@@ -21,7 +31,7 @@ fn renderer_slot() -> &'static Mutex<Option<Renderer>> {
 /// Runs `f` with the process renderer, creating it if needed. A panic
 /// inside (a lost device, a driver error surfacing as a wgpu panic) drops
 /// the renderer, so the next request starts on a fresh one.
-pub fn with_renderer<T>(software: bool, f: impl FnOnce(&mut Renderer) -> Option<T>) -> Option<T> {
+fn with_renderer<T>(software: bool, f: impl FnOnce(&mut Renderer) -> Result<T, Failure>) -> Result<T, Failure> {
     let mut slot = renderer_slot().lock().unwrap_or_else(|e| e.into_inner());
     if slot.is_none() {
         let created = catch_unwind(|| Renderer::new(software).or_else(|_| Renderer::new(true)));
@@ -29,24 +39,24 @@ pub fn with_renderer<T>(software: bool, f: impl FnOnce(&mut Renderer) -> Option<
             Ok(Ok(mut r)) => {
                 r.warm_up();
                 if cfg!(debug_assertions) {
-                    eprintln!("[Thumbnail] native renderer on {}", r.adapter);
+                    eprintln!("[Thumbnail] renderer on {}", r.adapter);
                 }
                 *slot = Some(r);
             }
             Ok(Err(e)) => {
-                eprintln!("[Thumbnail] no native renderer: {e}");
-                return None;
+                eprintln!("[Thumbnail] no renderer: {e}");
+                return Err(Failure::Renderer);
             }
-            Err(_) => return None,
+            Err(_) => return Err(Failure::Renderer),
         }
     }
-    let renderer = slot.as_mut()?;
+    let renderer = slot.as_mut().ok_or(Failure::Renderer)?;
     match catch_unwind(AssertUnwindSafe(|| f(renderer))) {
         Ok(result) => result,
         Err(_) => {
-            eprintln!("[Thumbnail] native renderer crashed; it will be recreated");
+            eprintln!("[Thumbnail] renderer crashed; it will be recreated");
             *slot = None;
-            None
+            Err(Failure::Renderer)
         }
     }
 }
@@ -54,39 +64,42 @@ pub fn with_renderer<T>(software: bool, f: impl FnOnce(&mut Renderer) -> Option<
 /// Creates the renderer ahead of the first request.
 #[cfg_attr(not(windows), allow(dead_code))] // only the Windows server warms up
 pub fn warm_up(software: bool) {
-    with_renderer(software, |_| Some(()));
+    let _ = with_renderer(software, |_| Ok(()));
 }
 
-/// Renders `path` into RGBA8 pixels, `size`×`size`, or None.
-pub fn render_rgba(path: &Path, size: u32, software: bool) -> Option<Vec<u8>> {
+/// Renders `path` into RGBA8 pixels, `size`×`size`.
+pub fn render_rgba(path: &Path, size: u32, software: bool) -> Result<Vec<u8>, Failure> {
     // Loading needs no GPU: done outside the renderer lock, so a server
     // reads several models in parallel.
     let prepared = match catch_unwind(|| dv3_render::prepare(path, size)) {
         Ok(Ok(p)) => p,
         Ok(Err(e)) => {
             if cfg!(debug_assertions) {
-                eprintln!("[Thumbnail] native: {e} ({})", path.display());
+                eprintln!("[Thumbnail] {e} ({})", path.display());
             }
-            return None;
+            return Err(Failure::NoPicture);
         }
         Err(_) => {
-            eprintln!("[Thumbnail] native loader crashed on {}", path.display());
-            return None;
+            eprintln!("[Thumbnail] loader crashed on {}", path.display());
+            return Err(Failure::NoPicture);
         }
     };
     with_renderer(software, |r| match dv3_render::render(r, &prepared, size) {
-        Ok(t) => Some(t.rgba),
+        Ok(t) => Ok(t.rgba),
         Err(e) => {
             if cfg!(debug_assertions) {
-                eprintln!("[Thumbnail] native: {e} ({})", path.display());
+                eprintln!("[Thumbnail] {e} ({})", path.display());
             }
-            None
+            match e {
+                ThumbnailError::Render(RenderError::EmptyFrame) => Err(Failure::NoPicture),
+                _ => Err(Failure::Renderer),
+            }
         }
     })
 }
 
-/// Renders `path` into a PNG, or None.
-pub fn render_png(path: &Path, size: u32, software: bool) -> Option<Vec<u8>> {
+/// Renders `path` into a PNG.
+pub fn render_png(path: &Path, size: u32, software: bool) -> Result<Vec<u8>, Failure> {
     let rgba = render_rgba(path, size, software)?;
-    dv3_render::encode_png(&rgba, size, size)
+    dv3_render::encode_png(&rgba, size, size).ok_or(Failure::Renderer)
 }

@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default capabilities for 3Dv",
-  "windows": ["main", "main-*", "thumbnailer"],
+  "windows": ["main", "main-*"],
   "permissions": [
     "core:default",
     "core:event:default",

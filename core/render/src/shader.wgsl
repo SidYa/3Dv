@@ -21,12 +21,18 @@ struct Frame {
     ambient: vec4<f32>,
     // x: environment intensity, y: viewport height, z: viewport width
     params: vec4<f32>,
+    // x: 1 when rendering the linear HDR transmission source (no tone
+    // mapping, no sRGB encoding)
+    params2: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> frame: Frame;
 @group(0) @binding(1) var env_map: texture_2d<f32>;
 @group(0) @binding(2) var linear_clamp: sampler;
 @group(0) @binding(3) var dfg_lut: texture_2d<f32>;
+// The opaque scene for transmissive materials, mipmapped.
+@group(0) @binding(4) var transmission_map: texture_2d<f32>;
+@group(0) @binding(5) var transmission_sampler: sampler;
 
 // Shading models.
 const STANDARD: u32 = 0u;
@@ -53,6 +59,8 @@ const T_BUMP: u32 = 4u;
 const T_AO: u32 = 5u;
 const T_ALPHA: u32 = 6u;
 const T_SPECULAR: u32 = 7u;
+const T_TRANSMISSION: u32 = 8u;
+const T_THICKNESS: u32 = 9u;
 
 struct Material {
     // rgb linear, a opacity
@@ -66,8 +74,12 @@ struct Material {
     extra: vec4<f32>,
     // x shading model, y flags, z textures present, w textures on uv1
     flags: vec4<u32>,
+    // x transmission, y ior, z thickness, w attenuationDistance
+    transmission: vec4<f32>,
+    // rgb attenuationColor
+    attenuation: vec4<f32>,
     // Per slot: two rows of the 2x3 uv transform.
-    uv_rows: array<vec4<f32>, 16>,
+    uv_rows: array<vec4<f32>, 20>,
 };
 
 @group(1) @binding(0) var<uniform> material: Material;
@@ -79,14 +91,18 @@ struct Material {
 @group(1) @binding(6) var t_ao: texture_2d<f32>;
 @group(1) @binding(7) var t_alpha: texture_2d<f32>;
 @group(1) @binding(8) var t_specular: texture_2d<f32>;
-@group(1) @binding(9) var s_map: sampler;
-@group(1) @binding(10) var s_emissive: sampler;
-@group(1) @binding(11) var s_metal_rough: sampler;
-@group(1) @binding(12) var s_normal: sampler;
-@group(1) @binding(13) var s_bump: sampler;
-@group(1) @binding(14) var s_ao: sampler;
-@group(1) @binding(15) var s_alpha: sampler;
-@group(1) @binding(16) var s_specular: sampler;
+@group(1) @binding(9) var t_transmission: texture_2d<f32>;
+@group(1) @binding(10) var t_thickness: texture_2d<f32>;
+@group(1) @binding(11) var s_map: sampler;
+@group(1) @binding(12) var s_emissive: sampler;
+@group(1) @binding(13) var s_metal_rough: sampler;
+@group(1) @binding(14) var s_normal: sampler;
+@group(1) @binding(15) var s_bump: sampler;
+@group(1) @binding(16) var s_ao: sampler;
+@group(1) @binding(17) var s_alpha: sampler;
+@group(1) @binding(18) var s_specular: sampler;
+@group(1) @binding(19) var s_transmission: sampler;
+@group(1) @binding(20) var s_thickness: sampler;
 
 struct VsIn {
     @location(0) position: vec3<f32>,
@@ -270,6 +286,88 @@ fn computeMultiscattering(fab: vec2<f32>, specular_color: vec3<f32>, specular_f9
     return Scattering(FssEss, Fms * Ems);
 }
 
+fn EnvironmentBRDF(normal: vec3<f32>, view_dir: vec3<f32>, specular_color: vec3<f32>, specular_f90: f32, roughness: f32) -> vec3<f32> {
+    let dotNV = saturate(dot(normal, view_dir));
+    let fab = textureSampleLevel(dfg_lut, linear_clamp, vec2<f32>(roughness, dotNV), 0.0).rg;
+    return specular_color * fab.x + specular_f90 * fab.y;
+}
+
+// --- transmission (transmission_pars_fragment) ------------------------------
+
+fn w0(a: f32) -> f32 { return (1.0 / 6.0) * (a * (a * (-a + 3.0) - 3.0) + 1.0); }
+fn w1(a: f32) -> f32 { return (1.0 / 6.0) * (a * a * (3.0 * a - 6.0) + 4.0); }
+fn w2(a: f32) -> f32 { return (1.0 / 6.0) * (a * (a * (-3.0 * a + 3.0) + 3.0) + 1.0); }
+fn w3(a: f32) -> f32 { return (1.0 / 6.0) * (a * a * a); }
+fn g0(a: f32) -> f32 { return w0(a) + w1(a); }
+fn g1(a: f32) -> f32 { return w2(a) + w3(a); }
+fn h0(a: f32) -> f32 { return -1.0 + w1(a) / (w0(a) + w1(a)); }
+fn h1(a: f32) -> f32 { return 1.0 + w3(a) / (w2(a) + w3(a)); }
+
+// The texture rows run top-down; three's v runs bottom-up, so v is flipped
+// on every fetch.
+fn transmission_fetch(uv: vec2<f32>, lod: f32) -> vec4<f32> {
+    return textureSampleLevel(transmission_map, transmission_sampler, vec2<f32>(uv.x, 1.0 - uv.y), lod);
+}
+
+fn bicubic(uv_in: vec2<f32>, texel_size: vec4<f32>, lod: f32) -> vec4<f32> {
+    let uv = uv_in * texel_size.zw + 0.5;
+    let iuv = floor(uv);
+    let fuv = fract(uv);
+    let g0x = g0(fuv.x);
+    let g1x = g1(fuv.x);
+    let h0x = h0(fuv.x);
+    let h1x = h1(fuv.x);
+    let h0y = h0(fuv.y);
+    let h1y = h1(fuv.y);
+    let p0 = (vec2<f32>(iuv.x + h0x, iuv.y + h0y) - 0.5) * texel_size.xy;
+    let p1 = (vec2<f32>(iuv.x + h1x, iuv.y + h0y) - 0.5) * texel_size.xy;
+    let p2 = (vec2<f32>(iuv.x + h0x, iuv.y + h1y) - 0.5) * texel_size.xy;
+    let p3 = (vec2<f32>(iuv.x + h1x, iuv.y + h1y) - 0.5) * texel_size.xy;
+    return g0(fuv.y) * (g0x * transmission_fetch(p0, lod) + g1x * transmission_fetch(p1, lod))
+        + g1(fuv.y) * (g0x * transmission_fetch(p2, lod) + g1x * transmission_fetch(p3, lod));
+}
+
+fn textureBicubic(uv: vec2<f32>, lod: f32) -> vec4<f32> {
+    let levels = i32(textureNumLevels(transmission_map)) - 1;
+    let f = clamp(i32(floor(lod)), 0, levels);
+    let c = clamp(i32(ceil(lod)), 0, levels);
+    let f_size = vec2<f32>(textureDimensions(transmission_map, f));
+    let c_size = vec2<f32>(textureDimensions(transmission_map, c));
+    let f_sample = bicubic(uv, vec4<f32>(1.0 / f_size, f_size), floor(lod));
+    let c_sample = bicubic(uv, vec4<f32>(1.0 / c_size, c_size), ceil(lod));
+    return mix(f_sample, c_sample, fract(lod));
+}
+
+fn applyIorToRoughness(roughness: f32, ior: f32) -> f32 {
+    return roughness * clamp(ior * 2.0 - 2.0, 0.0, 1.0);
+}
+
+fn volumeAttenuation(distance: f32, attenuation_color: vec3<f32>, attenuation_distance: f32) -> vec3<f32> {
+    // isinf(): an infinite distance arrives as a huge value.
+    if attenuation_distance > 1e30 {
+        return vec3<f32>(1.0);
+    }
+    let coefficient = -log(attenuation_color) / attenuation_distance;
+    return exp(-coefficient * distance);
+}
+
+// getIBLVolumeRefraction() in view space: the geometry is already in world
+// space, so three's modelScale is 1.
+fn volume_refraction(n: vec3<f32>, v: vec3<f32>, view_position: vec3<f32>, roughness: f32, diffuse_color: vec3<f32>, specular_color: vec3<f32>, specular_f90: f32, ior: f32, thickness: f32) -> vec4<f32> {
+    let ray = normalize(refract(-v, n, 1.0 / ior)) * thickness;
+    let exit = view_position + ray;
+    let ndc = frame.proj * vec4<f32>(exit, 1.0);
+    let coords = (ndc.xy / ndc.w + 1.0) / 2.0;
+    let size = f32(textureDimensions(transmission_map, 0).x);
+    let lod = log2(size) * applyIorToRoughness(roughness, ior);
+    let transmitted_light = textureBicubic(coords, lod);
+    let transmittance = diffuse_color * volumeAttenuation(length(ray), material.attenuation.rgb, material.transmission.w);
+    let attenuated = transmittance * transmitted_light.rgb;
+    let F = EnvironmentBRDF(n, v, specular_color, specular_f90, roughness);
+    let factor = (transmittance.r + transmittance.g + transmittance.b) / 3.0;
+    return vec4<f32>((1.0 - F) * attenuated, 1.0 - (1.0 - transmitted_light.a) * factor);
+}
+
 fn computeSpecularOcclusion(dotNV: f32, ambient_occlusion: f32, roughness: f32) -> f32 {
     return saturate(pow(dotNV + ambient_occlusion, exp2(-16.0 * roughness - 1.0)) - 1.0 + ambient_occlusion);
 }
@@ -406,6 +504,10 @@ fn sRGBTransferOETF(v: vec3<f32>) -> vec3<f32> {
 }
 
 fn finish(outgoing: vec3<f32>, alpha: f32) -> vec4<f32> {
+    // The transmission source is linear and not tone mapped.
+    if frame.params2.x > 0.5 {
+        return vec4<f32>(outgoing, alpha);
+    }
     var color = outgoing;
     if !has_flag(F_NO_TONE_MAPPING) {
         color = NeutralToneMapping(color);
@@ -429,6 +531,8 @@ fn fs_main(in: VsOut, @builtin(front_facing) front_facing: bool) -> @location(0)
     let texel_ao = textureSample(t_ao, s_ao, uv_for(T_AO, in));
     let texel_alpha = textureSample(t_alpha, s_alpha, uv_for(T_ALPHA, in));
     let texel_specular = textureSample(t_specular, s_specular, uv_for(T_SPECULAR, in));
+    let texel_transmission = textureSample(t_transmission, s_transmission, uv_for(T_TRANSMISSION, in));
+    let texel_thickness = textureSample(t_thickness, s_thickness, uv_for(T_THICKNESS, in));
     // dHdxy_fwd()
     let dSTdx = dpdx(uv_bump);
     let dSTdy = dfdy2(uv_bump);
@@ -596,6 +700,26 @@ fn fs_main(in: VsOut, @builtin(front_facing) front_facing: bool) -> @location(0)
             indirect_diffuse *= ambient_occlusion;
             let dotNV = saturate(dot(geometry_normal, view_dir));
             indirect_specular *= computeSpecularOcclusion(dotNV, ambient_occlusion, m.roughness);
+        }
+
+        // transmission_fragment: the diffuse part gives way to the light
+        // refracted through the surface.
+        var transmission = material.transmission.x;
+        if transmission > 0.0 {
+            if has_texture(T_TRANSMISSION) {
+                transmission *= texel_transmission.r;
+            }
+            var thickness = material.transmission.z;
+            if has_texture(T_THICKNESS) {
+                thickness *= texel_thickness.g;
+            }
+            let transmitted = volume_refraction(geometry_normal, view_dir, -in.view_position, m.roughness, m.diffuse_contribution, m.specular_color_blended, m.specular_f90, material.transmission.y, thickness);
+            direct_diffuse = mix(direct_diffuse + indirect_diffuse, transmitted.rgb, transmission);
+            indirect_diffuse = vec3<f32>(0.0);
+            alpha *= mix(1.0, transmitted.a, transmission);
+            if has_flag(F_OPAQUE) {
+                alpha = 1.0;
+            }
         }
     } else {
         // Phong and Lambert

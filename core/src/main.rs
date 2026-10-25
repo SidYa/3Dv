@@ -44,9 +44,6 @@ struct ThumbnailRequest {
     input: String,
     output: String,
     software: bool,
-    /// --3dv-webview: skip the native renderer (the Explorer provider asks
-    /// for this after the thumbnail server already failed on the model).
-    webview_only: bool,
 }
 
 fn get_thumbnail_request(args: &[String]) -> Option<ThumbnailRequest> {
@@ -56,12 +53,10 @@ fn get_thumbnail_request(args: &[String]) -> Option<ThumbnailRequest> {
     let input = args.get(i + 1)?.clone();
     let output = args.get(i + 2)?.clone();
     let software = args.iter().any(|a| a == "--3dv-software");
-    let webview_only = args.iter().any(|a| a == "--3dv-webview");
     Some(ThumbnailRequest {
         input,
         output,
         software,
-        webview_only,
     })
 }
 
@@ -225,113 +220,55 @@ fn set_as_default(app: AppHandle) -> bool {
     assoc::set_as_default(&app)
 }
 
-// --- thumbnail service commands ----------------------------------------
-// The hidden "thumbnailer" window (route #thumbnail in the frontend) calls
-// these; the viewer calls generate_thumbnail on Linux to prewarm the
-// shared freedesktop cache.
-
-#[tauri::command]
-fn thumbnail_ready(app: AppHandle, svc: State<'_, thumb::ThumbService>) {
-    thumb::on_ready(&app, &svc);
-}
-
-#[tauri::command]
-fn submit_thumbnail(
-    app: AppHandle,
-    svc: State<'_, thumb::ThumbService>,
-    id: u32,
-    png: Option<Vec<u8>>,
-    reason: Option<String>,
-) {
-    if png.is_none() {
-        eprintln!(
-            "[Thumbnail] render #{id} failed ({})",
-            reason.as_deref().unwrap_or("unknown")
-        );
-    }
-    thumb::on_result(&app, &svc, id, png);
-}
+// --- thumbnails -----------------------------------------------------------
 
 // Linux only: puts a freshly opened model's thumbnail into the shared
 // freedesktop cache, where every file manager finds it. Windows renders
-// thumbnails on demand through the Explorer provider (CLI below) and keeps
-// them in its own cache, and macOS has nothing that would read one.
+// thumbnails on demand through the Explorer provider and keeps them in its
+// own cache, and macOS has nothing that would read one.
 #[tauri::command]
-async fn generate_thumbnail(
-    app: AppHandle,
-    svc: State<'_, thumb::ThumbService>,
-    file_path: String,
-) -> Result<bool, ()> {
+async fn generate_thumbnail(file_path: String) -> Result<bool, ()> {
     if !thumb::has_system_thumbnail_cache() || !is_supported_model(&file_path) {
         return Ok(false);
     }
-    let path = Path::new(&file_path);
-    if thumb::has_fresh_thumbnail(path) {
+    let path = PathBuf::from(&file_path);
+    if thumb::has_fresh_thumbnail(&path) {
         return Ok(true);
     }
-    let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(u64::MAX);
+    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(u64::MAX);
     if size > thumb::PREWARM_MAX_BYTES {
         return Ok(false);
     }
-    // Native renderer first, off the async runtime; the hidden WebView
-    // renderer only for what it cannot draw.
-    let native_path = path.to_path_buf();
-    let native = tauri::async_runtime::spawn_blocking(move || native::render_png(&native_path, native::THUMB_SIZE, false))
-        .await
-        .ok()
-        .flatten();
-    if let Some(png) = native {
-        return Ok(thumb::store_thumbnail(path, &png));
-    }
-    match thumb::request_render(&app, &svc, file_path.clone()).await {
-        Some(png) => Ok(thumb::store_thumbnail(path, &png)),
-        None => Ok(false),
-    }
+    // Off the async runtime: loading and drawing block.
+    let stored = tauri::async_runtime::spawn_blocking(move || {
+        native::render_png(&path, native::THUMB_SIZE, false)
+            .map(|png| thumb::store_thumbnail(&path, &png))
+            .unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false);
+    Ok(stored)
 }
 
-// `3Dv.exe 3dv-thumbnail <model> <output.png> [--3dv-software]` — used by
-// the Windows Explorer thumbnail provider (thumbnail-provider/). Explorer
-// starts this once per thumbnail, so concurrent runs must NOT be blocked
-// by the single-instance lock (viewer-only, see run_app).
-async fn cli_render(app: &AppHandle, req: &ThumbnailRequest) -> i32 {
-    let svc = app.state::<thumb::ThumbService>();
-    if !Path::new(&req.input).is_file() {
-        return 2;
-    }
-    match thumb::request_render(app, &svc, req.input.clone()).await {
-        Some(png) if thumb::write_file_atomic(Path::new(&req.output), &png) => 0,
-        Some(_) => 1,
-        None => 2,
-    }
-}
-
+// `3Dv.exe 3dv-thumbnail <model> <output.png> [--3dv-software]`: renders one
+// thumbnail and exits, without Tauri or a window. The Explorer provider
+// runs it when the thumbnail server is unavailable. Exit codes: 0 written,
+// 1 the renderer failed (worth a retry with --3dv-software), 2 the model
+// gives no picture.
 fn run_thumbnail_cli(req: ThumbnailRequest) -> ! {
-    // The native renderer answers almost every model in milliseconds and
-    // needs no WebView at all; only what it cannot draw goes on below.
-    if !req.webview_only {
-        let input = Path::new(&req.input);
-        if !input.is_file() {
-            std::process::exit(2);
-        }
-        if let Some(png) = native::render_png(input, native::THUMB_SIZE, req.software) {
-            let code = if thumb::write_file_atomic(Path::new(&req.output), &png) { 0 } else { 1 };
-            std::process::exit(code);
-        }
+    let input = Path::new(&req.input);
+    if !input.is_file() {
+        std::process::exit(2);
     }
-    if req.software {
-        // WebView2 software fallback; the Explorer provider retries with
-        // --3dv-software if a GPU run crashes.
-        std::env::set_var(
-            "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-            "--use-gl=angle --use-angle=swiftshader",
-        );
-    }
-    // run_app diverges; the setup hook renders and exits the process.
-    run_app(Some(req), None);
-    unreachable!("tauri run() must diverge");
+    let code = match native::render_png(input, native::THUMB_SIZE, req.software) {
+        Ok(png) if thumb::write_file_atomic(Path::new(&req.output), &png) => 0,
+        Ok(_) | Err(native::Failure::Renderer) => 1,
+        Err(native::Failure::NoPicture) => 2,
+    };
+    std::process::exit(code);
 }
 
-fn run_app(cli: Option<ThumbnailRequest>, initial: Option<String>) {
+fn run_app(initial: Option<String>) {
     let pending = Mutex::new(initial.into_iter().collect::<Vec<String>>());
     let builder = tauri::Builder::default()
         .manage(PendingFiles(pending))
@@ -344,43 +281,23 @@ fn run_app(cli: Option<ThumbnailRequest>, initial: Option<String>) {
             get_initial_file,
             show_open_dialog,
             generate_thumbnail,
-            thumbnail_ready,
-            submit_thumbnail,
             set_as_default
-        ]);
-
-    // Single instance is a viewer concept; CLI renders must run in parallel.
-    let builder = match cli.clone() {
-        None => builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+        ])
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             let file = find_model_arg(&argv).filter(|f| is_supported_model(f));
             open_in_viewer(app, file);
-        })),
-        Some(_) => builder,
-    };
+        }));
 
     builder
         .setup(move |app| {
             let handle = app.handle().clone();
-            match cli.clone() {
-                Some(req) => {
-                    // Private WebView2 profile, see thumb::cli_profile_dir.
-                    let profile = thumb::cli_profile_dir(&handle);
-                    app.manage(thumb::ThumbService::with_profile(profile));
-                    std::thread::spawn(move || {
-                        let code = tauri::async_runtime::block_on(cli_render(&handle, &req));
-                        std::process::exit(code);
-                    });
-                }
-                None => {
-                    app.manage(thumb::ThumbService::new());
-                    // The main window is created here rather than from the
-                    // config ("create": false), so CLI thumbnail runs do not
-                    // boot a hidden viewer next to the thumbnailer.
-                    create_viewer_window(&handle);
-                    // Housekeeping, off the startup path.
-                    std::thread::spawn(thumb::remove_legacy_cache);
-                }
-            }
+            // The main window is created here rather than from the config
+            // ("create": false) so that it starts hidden with the viewer's
+            // background, see create_viewer_window.
+            create_viewer_window(&handle);
+            // Housekeeping, off the startup path.
+            let profiles = app.path().app_local_data_dir().ok().map(|d| d.join("thumb-profiles"));
+            std::thread::spawn(move || thumb::remove_legacy_cache(profiles));
             Ok(())
         })
         .run(tauri::generate_context!())
@@ -398,5 +315,5 @@ fn main() {
     if let Some(req) = get_thumbnail_request(&args) {
         run_thumbnail_cli(req);
     }
-    run_app(None, find_model_arg(&args));
+    run_app(find_model_arg(&args));
 }

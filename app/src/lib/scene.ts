@@ -1,8 +1,9 @@
-// Scene conventions shared by the viewer and the thumbnail renderer.
+// Scene conventions of the viewer.
 //
-// Both use the same lighting, the same background and the same camera
-// framing, so a cached thumbnail is the picture the viewer shows when the
-// model is opened - the two must never drift apart.
+// The native thumbnail renderer (core/render, gpu.rs and shader.wgsl)
+// reproduces this lighting, background and camera framing, so a cached
+// thumbnail is the picture the viewer shows when the model is opened -
+// change one, change the other.
 
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
@@ -110,21 +111,6 @@ export function tunePointSize(object, worldRadius) {
             }
         }
     });
-}
-
-// True when anything in the object would actually draw pixels. Files that
-// carry only cameras, bones or empty groups load without error but render
-// an empty frame, and caching that empty frame is worse than reporting a
-// failure the caller can retry.
-export function hasRenderableGeometry(object) {
-    let found = false;
-    object.traverse((child) => {
-        if (found) return;
-        if (!(child.isMesh || child.isPoints || child.isLine) || !child.geometry) return;
-        const position = child.geometry.getAttribute && child.geometry.getAttribute('position');
-        if (position && position.count > 0) found = true;
-    });
-    return found;
 }
 
 function disposeMaterial(material) {

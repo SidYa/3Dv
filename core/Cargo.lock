@@ -986,7 +986,6 @@ version = "1.0.0"
 dependencies = [
  "dv3-render",
  "md5",
- "serde",
  "serde_json",
  "tauri",
  "tauri-build",
@@ -994,7 +993,6 @@ dependencies = [
  "tauri-plugin-fs",
  "tauri-plugin-opener",
  "tauri-plugin-single-instance",
- "tokio",
  "windows-sys 0.61.2",
 ]
 

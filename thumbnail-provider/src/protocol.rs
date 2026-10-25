@@ -15,8 +15,12 @@ use std::io::{Read, Write};
 
 pub const MAGIC: u32 = 0x3376_5444; // "DTv3"
 pub const STATUS_OK: u32 = 0;
-/// The native renderer could not draw the model; use the WebView CLI.
-pub const STATUS_FALLBACK: u32 = 1;
+/// The server's renderer failed (no device, a device error); a fresh
+/// process may still succeed, on the software rasterizer if need be.
+pub const STATUS_RENDERER_FAILED: u32 = 1;
+/// The model gives no picture (unreadable, nothing to draw); retrying is
+/// pointless.
+pub const STATUS_NO_PICTURE: u32 = 2;
 /// Largest thumbnail the server renders; Explorer scales bigger requests.
 pub const MAX_SIZE: u32 = 1024;
 pub const MIN_SIZE: u32 = 16;
@@ -115,8 +119,8 @@ mod tests {
         assert_eq!((status, w, h, px), (STATUS_OK, 2, 1, vec![1, 2, 3, 4, 5, 6, 7, 8]));
 
         let mut buf = Vec::new();
-        write_response(&mut buf, STATUS_FALLBACK, 0, 0, &[]).unwrap();
-        assert_eq!(read_response(&mut buf.as_slice()).unwrap().0, STATUS_FALLBACK);
+        write_response(&mut buf, STATUS_NO_PICTURE, 0, 0, &[]).unwrap();
+        assert_eq!(read_response(&mut buf.as_slice()).unwrap().0, STATUS_NO_PICTURE);
     }
 
     #[test]

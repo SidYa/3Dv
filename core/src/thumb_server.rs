@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::native::Failure;
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_PIPE_CONNECTED, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Storage::FileSystem::{FlushFileBuffers, ReadFile, WriteFile, FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX};
 use windows_sys::Win32::System::Pipes::{ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT};
@@ -166,15 +167,18 @@ fn worker(mut pipe: Pipe, state: &State) {
 fn serve(pipe: &mut Pipe, state: &State) {
     let Ok((path, size)) = protocol::read_request(pipe) else { return };
     match crate::native::render_rgba(Path::new(&path), size, state.software) {
-        Some(mut pixels) => {
+        Ok(mut pixels) => {
             // RGBA → BGRA, what a DIB section wants.
             for px in pixels.chunks_exact_mut(4) {
                 px.swap(0, 2);
             }
             let _ = protocol::write_response(pipe, protocol::STATUS_OK, size, size, &pixels);
         }
-        None => {
-            let _ = protocol::write_response(pipe, protocol::STATUS_FALLBACK, 0, 0, &[]);
+        Err(Failure::NoPicture) => {
+            let _ = protocol::write_response(pipe, protocol::STATUS_NO_PICTURE, 0, 0, &[]);
+        }
+        Err(Failure::Renderer) => {
+            let _ = protocol::write_response(pipe, protocol::STATUS_RENDERER_FAILED, 0, 0, &[]);
         }
     }
 }
