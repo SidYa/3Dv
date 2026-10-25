@@ -2,6 +2,7 @@
 // that ships inside 3Dv, with its licence and the licence text found in its sources
 // (same as in Hyper and Farba).
 //
+//   origin   projects 3Dv's code is ported from
 //   bundled  decoders shipped next to the UI (public/draco, public/basis) or inlined
 //   rust     crates compiled into the app for the build target (CARGO_BUILD_TARGET,
 //            else this OS: Windows MSVC / Linux GNU)
@@ -129,8 +130,17 @@ function jsPackages() {
   for (const r of roots) visit(r, appDir, 0);
 }
 
-// --- Decoders (not discoverable from manifests) ---------------------------
+// --- Origins and decoders (not discoverable from manifests) ---------------
 const manual = [
+  {
+    kind: 'origin',
+    name: 'three.js',
+    version: 'r186',
+    license: 'MIT',
+    repository: 'https://github.com/mrdoob/three.js',
+    note: 'The native thumbnail renderer (core/render) ports three.js: its glTF, OBJ/MTL, FBX, STL, PLY, Collada and 3DS loaders, its material shading and tone mapping, and embeds the RoomEnvironment lighting and DFG table baked by three.js.',
+    texts: licenseTexts(resolveDir('three', appDir)),
+  },
   {
     kind: 'bundled',
     name: 'Draco',
@@ -167,7 +177,7 @@ try {
 }
 jsPackages();
 
-const order = { bundled: 0, rust: 1, js: 2 };
+const order = { origin: 0, bundled: 1, rust: 2, js: 3 };
 const all = [...manual, ...packages].sort(
   (a, b) => order[a.kind] - order[b.kind] || a.name.localeCompare(b.name),
 );

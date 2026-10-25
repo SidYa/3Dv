@@ -416,24 +416,9 @@ fn ensure_window(app: &AppHandle, svc: &ThumbService) {
     .visible(false)
     .skip_taskbar(true)
     .decorations(false)
-    .on_navigation(|url| {
-        eprintln!("[Thumbnail] nav {url}");
-        true
-    })
-    .on_page_load(|_webview, payload| {
-        eprintln!(
-            "[Thumbnail] page {:?} {}",
-            payload.event(),
-            payload.url()
-        );
-    })
-    .on_document_title_changed(|_webview, title| {
-        eprintln!("[Thumbnail] title: {title}");
-    })
     .build()
     {
         Ok(win) => {
-            eprintln!("[Thumbnail] window up");
             if let Ok(mut inner) = svc.inner.lock() {
                 inner.window_alive = true;
                 inner.window_ready = false;
@@ -576,7 +561,6 @@ pub(crate) fn process_queue(app: &AppHandle, svc: &ThumbService) {
             None => return,
         };
         spawn_timeout(app, job.id);
-        eprintln!("[Thumbnail] render start #{} {}", job.id, job.file_path);
         let win = match app.get_webview_window(THUMB_WINDOW_LABEL) {
             Some(w) => w,
             None => {
@@ -637,7 +621,6 @@ pub(crate) fn finish_entry(
 }
 
 pub(crate) fn on_ready(app: &AppHandle, svc: &ThumbService) {
-    eprintln!("[Thumbnail] window ready");
     if let Ok(mut inner) = svc.inner.lock() {
         inner.window_ready = true;
     }

@@ -28,7 +28,6 @@
   // flat colour.
   const PROBE_STEP = 4;
 
-  let status = $state('init');
   let root: HTMLDivElement | null = null;
 
   let scene: THREE.Scene;
@@ -41,16 +40,6 @@
   let waitTimer: ReturnType<typeof setTimeout> | null = null;
 
   const LOAD_TIMEOUT_MS = 20000;
-
-  function dbg(msg: string) {
-    invoke('thumb_debug', { msg }).catch(() => {});
-  }
-
-  // Mirror into the title: the hidden window has no DevTools, Rust logs
-  // title changes (see on_document_title_changed in thumb.rs).
-  $effect(() => {
-    document.title = `thumb:${status}`;
-  });
 
   function initRenderer() {
     scene = new THREE.Scene();
@@ -130,7 +119,6 @@
     scene.remove(request.object);
     disposeObject(request.object);
     pending = null;
-    status = empty ? 'empty-frame' : 'done';
 
     respond(request.id, png, empty ? 'empty-frame' : png ? null : 'encode-failed');
   }
@@ -150,8 +138,6 @@
   async function handleRequest(request: { id: number; filePath: string }) {
     latestRequestId = request.id;
     releasePending('superseded');
-    status = 'loading';
-    dbg(`load start #${request.id} ${request.filePath}`);
 
     let loaded: any;
     try {
@@ -163,12 +149,9 @@
           setTimeout(() => reject(new Error('load-timeout')), LOAD_TIMEOUT_MS),
         ),
       ]);
-      dbg(`loaded #${request.id}`);
     } catch (err) {
       console.error('Thumbnail load failed:', err);
       if (latestRequestId === request.id) {
-        status = 'load-failed';
-        dbg(`load failed #${request.id}: ${err}`);
         respond(request.id, null, 'load-failed');
       }
       return;
@@ -181,7 +164,6 @@
 
     if (!hasRenderableGeometry(loaded.object)) {
       disposeObject(loaded.object);
-      status = 'no-geometry';
       respond(request.id, null, 'no-geometry');
       return;
     }
@@ -191,45 +173,31 @@
     if (!sphere) {
       scene.remove(loaded.object);
       disposeObject(loaded.object);
-      status = 'no-extent';
       respond(request.id, null, 'no-extent');
       return;
     }
     tunePointSize(loaded.object, sphere.radius);
 
     pending = { id: request.id, object: loaded.object, deadline: Date.now() + TEXTURE_WAIT_MS };
-    status = 'rendering';
-    dbg(`rendering #${request.id}`);
     waitTimer = setTimeout(waitLoop, 50);
   }
 
   onMount(async () => {
     initRenderer();
-    dbg('mounted');
     await listen<{ id: number; filePath: string }>(
       'generate-thumbnail-render',
       (e) => {
-        dbg(`event #${e.payload?.id} ${e.payload?.filePath}`);
         if (e.payload && typeof e.payload.filePath === 'string') handleRequest(e.payload);
       },
     );
-    status = 'ready';
     invoke('thumbnail_ready').catch((e) => console.error('ready failed:', e));
   });
 </script>
 
 <div id="thumb-root" bind:this={root}></div>
-<div id="thumb-status">{status}</div>
 
 <style>
-  #thumb-root,
-  #thumb-status {
+  #thumb-root {
     position: absolute;
-  }
-  #thumb-status {
-    bottom: 4px;
-    left: 8px;
-    font-size: 11px;
-    color: #888;
   }
 </style>

@@ -32,6 +32,7 @@
   "licenses_components": "components",
   "licenses_search": "Search by name or license",
   "licenses_close": "Close",
+  "licenses_origin": "Based on",
   "licenses_bundled": "Decoders",
   "licenses_rust": "Rust libraries",
   "licenses_js": "JavaScript libraries"

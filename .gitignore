@@ -6,12 +6,8 @@ release
 .DS_Store
 .claude
 
-# MSVC output for the Explorer thumbnail provider
+# The Explorer thumbnail provider DLL, copied here by thumbnail-provider/build.cmd
 thumbnail-provider/build/
-thumbnail-provider/*.obj
-thumbnail-provider/*.lib
-thumbnail-provider/*.exp
-thumbnail-provider/*.pdb
 
 # backups created by the AGENTS.md snapshot recipe
 BCP/

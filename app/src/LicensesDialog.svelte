@@ -7,7 +7,7 @@
   import { invoke } from '@tauri-apps/api/core';
 
   interface Pkg {
-    kind: 'bundled' | 'rust' | 'js';
+    kind: 'origin' | 'bundled' | 'rust' | 'js';
     name: string;
     version: string;
     license: string;
@@ -33,6 +33,7 @@
   let closeBtn = $state<HTMLButtonElement | undefined>();
 
   const GROUPS: { kind: Pkg['kind']; label: string }[] = [
+    { kind: 'origin', label: 'licenses_origin' },
     { kind: 'bundled', label: 'licenses_bundled' },
     { kind: 'rust', label: 'licenses_rust' },
     { kind: 'js', label: 'licenses_js' },

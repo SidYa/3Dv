@@ -1,0 +1,31 @@
+[package]
+name = "dv3-render"
+version = "1.0.0"
+description = "Native thumbnail renderer of 3Dv: model loaders and an offscreen wgpu renderer that match the viewer's three.js scene"
+license = "GPL-3.0-only"
+edition = "2021"
+publish = false
+
+[dependencies]
+pollster = "1"
+bytemuck = { version = "1", features = ["derive"] }
+glam = "0.34"
+gltf = { version = "1.4", default-features = false, features = ["import", "utils", "names", "KHR_texture_transform", "KHR_materials_unlit", "KHR_materials_emissive_strength", "KHR_materials_transmission", "KHR_materials_ior", "KHR_materials_specular", "KHR_materials_volume"] }
+ufbx = "0.11"
+roxmltree = "0.21"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "tga", "gif", "webp"] }
+jpeg-decoder = "0.3"
+miniz_oxide = "0.8"
+png = "0.18"
+
+# One graphics backend per platform keeps the binaries small: DX12 on Windows
+# (also the WARP software rasterizer), Vulkan with a GL fallback on Linux
+# (llvmpipe/lavapipe without a GPU), Metal on macOS.
+[target.'cfg(windows)'.dependencies]
+wgpu = { version = "30", default-features = false, features = ["wgsl", "dx12", "std"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+wgpu = { version = "30", default-features = false, features = ["wgsl", "vulkan", "gles", "std"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+wgpu = { version = "30", default-features = false, features = ["wgsl", "metal", "std"] }

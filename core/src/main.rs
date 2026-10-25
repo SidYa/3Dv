@@ -7,6 +7,9 @@ use tauri_plugin_dialog::{DialogExt, FilePath};
 
 mod thumb;
 mod assoc;
+mod native;
+#[cfg(windows)]
+mod thumb_server;
 
 // ---- constants (mirrors FILE_TYPES in old main.js) --------------------
 const MODEL_EXTS: &[&str] = &["glb", "gltf", "obj", "fbx", "stl", "ply", "dae", "3ds"];
@@ -41,6 +44,9 @@ struct ThumbnailRequest {
     input: String,
     output: String,
     software: bool,
+    /// --3dv-webview: skip the native renderer (the Explorer provider asks
+    /// for this after the thumbnail server already failed on the model).
+    webview_only: bool,
 }
 
 fn get_thumbnail_request(args: &[String]) -> Option<ThumbnailRequest> {
@@ -50,10 +56,12 @@ fn get_thumbnail_request(args: &[String]) -> Option<ThumbnailRequest> {
     let input = args.get(i + 1)?.clone();
     let output = args.get(i + 2)?.clone();
     let software = args.iter().any(|a| a == "--3dv-software");
+    let webview_only = args.iter().any(|a| a == "--3dv-webview");
     Some(ThumbnailRequest {
         input,
         output,
         software,
+        webview_only,
     })
 }
 
@@ -227,13 +235,6 @@ fn thumbnail_ready(app: AppHandle, svc: State<'_, thumb::ThumbService>) {
     thumb::on_ready(&app, &svc);
 }
 
-// Console bridge for the hidden renderer: its DevTools is never visible,
-// so it reports here instead (mirrors the old console-message forwarding).
-#[tauri::command]
-fn thumb_debug(msg: String) {
-    eprintln!("[thumb-webview] {msg}");
-}
-
 #[tauri::command]
 fn submit_thumbnail(
     app: AppHandle,
@@ -247,8 +248,6 @@ fn submit_thumbnail(
             "[Thumbnail] render #{id} failed ({})",
             reason.as_deref().unwrap_or("unknown")
         );
-    } else {
-        eprintln!("[Thumbnail] render #{id} ok ({} bytes)", png.as_ref().map(|b| b.len()).unwrap_or(0));
     }
     thumb::on_result(&app, &svc, id, png);
 }
@@ -274,6 +273,16 @@ async fn generate_thumbnail(
     if size > thumb::PREWARM_MAX_BYTES {
         return Ok(false);
     }
+    // Native renderer first, off the async runtime; the hidden WebView
+    // renderer only for what it cannot draw.
+    let native_path = path.to_path_buf();
+    let native = tauri::async_runtime::spawn_blocking(move || native::render_png(&native_path, native::THUMB_SIZE, false))
+        .await
+        .ok()
+        .flatten();
+    if let Some(png) = native {
+        return Ok(thumb::store_thumbnail(path, &png));
+    }
     match thumb::request_render(&app, &svc, file_path.clone()).await {
         Some(png) => Ok(thumb::store_thumbnail(path, &png)),
         None => Ok(false),
@@ -297,6 +306,18 @@ async fn cli_render(app: &AppHandle, req: &ThumbnailRequest) -> i32 {
 }
 
 fn run_thumbnail_cli(req: ThumbnailRequest) -> ! {
+    // The native renderer answers almost every model in milliseconds and
+    // needs no WebView at all; only what it cannot draw goes on below.
+    if !req.webview_only {
+        let input = Path::new(&req.input);
+        if !input.is_file() {
+            std::process::exit(2);
+        }
+        if let Some(png) = native::render_png(input, native::THUMB_SIZE, req.software) {
+            let code = if thumb::write_file_atomic(Path::new(&req.output), &png) { 0 } else { 1 };
+            std::process::exit(code);
+        }
+    }
     if req.software {
         // WebView2 software fallback; the Explorer provider retries with
         // --3dv-software if a GPU run crashes.
@@ -324,7 +345,6 @@ fn run_app(cli: Option<ThumbnailRequest>, initial: Option<String>) {
             show_open_dialog,
             generate_thumbnail,
             thumbnail_ready,
-            thumb_debug,
             submit_thumbnail,
             set_as_default
         ]);
@@ -369,6 +389,12 @@ fn run_app(cli: Option<ThumbnailRequest>, initial: Option<String>) {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    // Explorer's thumbnail server: no Tauri, no window, see thumb_server.rs.
+    #[cfg(windows)]
+    if args.iter().any(|a| a == "3dv-thumbnail-server") {
+        let software = args.iter().any(|a| a == "--3dv-software");
+        std::process::exit(thumb_server::run(software));
+    }
     if let Some(req) = get_thumbnail_request(&args) {
         run_thumbnail_cli(req);
     }

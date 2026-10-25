@@ -1,0 +1,24 @@
+[package]
+name = "dv3-thumbnail-provider"
+version = "1.0.0"
+description = "Windows Explorer thumbnail handler of 3Dv"
+license = "GPL-3.0-only"
+edition = "2021"
+publish = false
+workspace = "../core"
+
+[lib]
+name = "3DvThumb"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[target.'cfg(windows)'.dependencies]
+# COM interfaces and the implement macro.
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Com", "Win32_UI_Shell", "Win32_UI_Shell_PropertiesSystem"] }
+windows-core = "0.62"
+# Plain Win32 calls.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_System_Pipes", "Win32_System_Registry", "Win32_System_RemoteDesktop", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_UI_Shell"] }
+png = "0.18"
+
+[target.'cfg(windows)'.dev-dependencies]
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Com", "Win32_System_LibraryLoader", "Win32_UI_Shell", "Win32_UI_Shell_PropertiesSystem"] }

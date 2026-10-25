@@ -32,6 +32,7 @@
   "licenses_components": "компонентів",
   "licenses_search": "Пошук за назвою або ліцензією",
   "licenses_close": "Закрити",
+  "licenses_origin": "Засновано на",
   "licenses_bundled": "Декодери",
   "licenses_rust": "Бібліотеки Rust",
   "licenses_js": "Бібліотеки JavaScript"

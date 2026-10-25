@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "render", "../thumbnail-provider"]
+
 [package]
 name = "dv3"
 version = "1.0.0"
@@ -13,6 +16,7 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+dv3-render = { path = "render" }
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-dialog = "2"
@@ -22,6 +26,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 md5 = "0.7"
 tokio = { version = "1", features = ["sync", "time"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Pipes", "Win32_System_IO", "Win32_System_Threading", "Win32_System_RemoteDesktop", "Win32_Security"] }
 
 # Smaller, faster binary: quicker to load at every start and every Explorer
 # thumbnail run (same as Hyper and Farba).
