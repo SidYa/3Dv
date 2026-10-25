@@ -3,7 +3,9 @@
 
 #[allow(unused_imports)]
 use std::path::PathBuf;
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
+#[cfg(target_os = "windows")]
+use tauri::Manager;
 
 const FILE_TYPES: &[(&str, &str)] = &[
     ("glb", "model/gltf-binary"),
@@ -16,10 +18,15 @@ const FILE_TYPES: &[(&str, &str)] = &[
     ("3ds", "application/x-3ds"),
 ];
 
+#[cfg(any(target_os = "windows", test))]
 const THUMBNAIL_CLSID: &str = "{3D76A1B0-9F5C-4A2D-8BF1-C24E5A6D7F8E}";
+#[cfg(any(target_os = "windows", test))]
 const THUMBNAIL_HANDLER_KEY: &str = "ShellEx\\{e357fccd-a995-4576-b01f-234630154e96}";
 
 pub fn set_as_default(app: &AppHandle) -> bool {
+    // Only Windows registers through the app's resources.
+    #[cfg(not(target_os = "windows"))]
+    let _ = app;
     #[cfg(target_os = "windows")]
     return set_default_windows(app);
     #[cfg(target_os = "linux")]
@@ -90,10 +97,12 @@ fn set_default_windows(app: &AppHandle) -> bool {
     ok
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn reg_quote(value: &str) -> String {
     format!("\"{}\"", value.replace("\\", "\\\\").replace("\"", "\\\""))
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn build_assoc_reg(exe_path: &str, has_dll: bool) -> String {
     let mut lines = vec![
         "Windows Registry Editor Version 5.00".to_string(),
