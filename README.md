@@ -11,3 +11,5 @@ A simple, fast 3D model viewer for Windows and Linux
 `L` light <br>
 `R` reset view <br>
 `Ctrl+O` open
+
+<img width="951" height="832" alt="Screenshot 2026-10-25 095622" src="https://github.com/user-attachments/assets/4a5f1fbd-ec71-4e28-aa14-48925932ec13" />
